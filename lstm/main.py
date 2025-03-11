@@ -72,20 +72,19 @@ class MetricsLogger(Callback):
 
         # Retrieve losses separately for latency and PDR
         train_loss_latency = logs.get("latency_ms_loss")
+        train_rmse_latency = logs.get("latency_ms_rmse")
         train_loss_pdr = logs.get("pdr_loss")
+        train_rmse_pdr = logs.get("pdr_rmse")
         total_train_loss = logs.get("loss")
 
         val_loss_latency = logs.get("val_latency_ms_loss")
+        val_rmse_latency = logs.get("val_latency_ms_rmse")
         val_loss_pdr = logs.get("val_pdr_loss")
+        val_rmse_pdr = logs.get("val_pdr_rmse")
         total_val_loss = logs.get("val_loss")
 
         # Compute RMSE separately for each target
-        train_rmse_latency = np.sqrt(train_loss_latency) if train_loss_latency else None
-        train_rmse_pdr = np.sqrt(train_loss_pdr) if train_loss_pdr else None
         total_train_rmse = np.sqrt(total_train_loss) if total_train_loss else None
-
-        val_rmse_latency = np.sqrt(val_loss_latency) if val_loss_latency else None
-        val_rmse_pdr = np.sqrt(val_loss_pdr) if val_loss_pdr else None
         total_val_rmse = np.sqrt(total_val_loss) if total_val_loss else None
 
         # Write to log file
