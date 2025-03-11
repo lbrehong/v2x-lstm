@@ -271,10 +271,6 @@ if __name__ == "__main__":
         "latency_ms": y_train[:, 0],  # Extract latency values
         "pdr": y_train[:, 1]  # Extract PDR values
     }
-    y_new_data_dict = {
-        "latency_ms": y_new_data[:, 0],  # Extract latency values
-        "pdr": y_new_data[:, 1]  # Extract PDR values
-    }
 
     # Load existing model or train new one
     # Check for consistency of arguments
@@ -367,9 +363,9 @@ if __name__ == "__main__":
     # Automatic retraining
     print("____________________________________________________")
     print("Automatic retraining.")
-    automatic_train(model_lstm, X_new_data, y_new_data_dict, 32, 500, 0.15, "prediction_log_" + "lstm" + "_" + RAT +  ".csv")
-    automatic_train(model_gru, X_new_data, y_new_data_dict, 32, 500, 0.15, "prediction_log_" + "gru" + "_" + RAT +  ".csv")
-    automatic_train(model_rnn, X_new_data, y_new_data_dict, 32, 500, 0.15, "prediction_log_" + "rnn" + "_" + RAT +  ".csv")
+    automatic_train(model_lstm, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "lstm" + "_" + RAT +  ".csv")
+    automatic_train(model_gru, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "gru" + "_" + RAT +  ".csv")
+    automatic_train(model_rnn, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "rnn" + "_" + RAT +  ".csv")
 
 
     # Plot losses

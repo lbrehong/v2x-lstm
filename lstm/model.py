@@ -43,20 +43,23 @@ def build_model(type, timesteps, features):
 #%%
 ### Define data stream generator
 class DataStreamGenerator(keras.utils.Sequence): # not used yet
-    def __init__(self, data, labels, batch_size=1):
-        self.data = data
+    def __init__(self, X_data, y_data_dict, labels, batch_size=1):
+        self.X_data = X_data
+        self.y_data_dict = y_data_dict  # Now correctly formatted as a dictionary
         self.labels = np.array(labels)
         self.batch_size = batch_size
 
     def __len__(self):
-        return int(np.ceil(len(self.data) / self.batch_size))
+        return int(np.ceil(len(self.X_data) / self.batch_size))
 
     def __getitem__(self, idx):
-        start_idx = idx * self.batch_size
-        end_idx = (idx + 1) * self.batch_size
-        batch_X = self.data[start_idx:end_idx]
-        batch_y = self.labels[start_idx:end_idx]
-        return np.array(batch_X), np.array(batch_y)
+        batch_x = self.X_data[idx * self.batch_size:(idx + 1) * self.batch_size]
+
+        # Fetch separate targets for latency & PDR
+        batch_y_latency = self.y_data_dict["latency_ms"][idx * self.batch_size:(idx + 1) * self.batch_size]
+        batch_y_pdr = self.y_data_dict["pdr"][idx * self.batch_size:(idx + 1) * self.batch_size]
+
+        return np.array(batch_x), {"latency_ms": np.array(batch_y_latency), "pdr": np.array(batch_y_pdr)}
 
 #%%
 ### Train the model
@@ -108,25 +111,39 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
         x_new.append(X_new_data[i])
         y_new.append(y_new_data[i])
 
-
         if len(x_new) >= N:  # Retrain every 500 new points
             # Log predictions before training
             for j in range(len(x_new)):
                 lat, lon = x_new[j][-1][:2]  # Extract last lat, lon in sequence
-                pred = model.predict(np.expand_dims(x_new[j], axis=0))[0]
-                actual = y_new[j]
+                # Get prediction
+                pred = model.predict(np.expand_dims(x_new[j], axis=0))  # Predict single sequence
 
-                pred_latency, pred_pdr = pred[0], pred[1]
-                actual_latency, actual_pdr = actual[0], actual[1]
+                # Ensure pred is a tuple with two arrays (latency, PDR)
+                pred_latency, pred_pdr = pred[0][0], pred[1][0]  # Extract first values from both arrays
+
+                # Actual values (correct shape)
+                actual_latency, actual_pdr = y_new[j][0], y_new[j][1]
 
                 error_latency = np.sqrt((pred_latency - actual_latency) ** 2)  # RMSE for latency
                 error_pdr = np.sqrt((pred_pdr - actual_pdr) ** 2)  # RMSE for PDR
 
                 log_entries.append(f"{lat},{lon},{pred_latency},{actual_latency},{error_latency},{pred_pdr},{actual_pdr},{error_pdr}")
 
+            # Convert y_new to dictionary format for multi-output training
+            y_new_dict = {
+                "latency_ms": np.array(y_new)[:, 0],  # Extract latency values
+                "pdr": np.array(y_new)[:, 1]       # Extract PDR values
+            }
+
+            # Convert validation set to dictionary format
+            y_val_dict = {
+                "latency_ms": np.array(y_val)[:, 0],
+                "pdr": np.array(y_val)[:, 1]
+            }
+
             # Train the model
-            generator = DataStreamGenerator(x_new, y_new, batch_size)
-            model.fit(generator, epochs=1, verbose=1, callbacks=[EarlyStopping(patience=2)], validation_data=(np.array(X_val), np.array(y_val)))
+            generator = DataStreamGenerator(x_new, y_new_dict, batch_size)
+            model.fit(generator, epochs=1, verbose=1, callbacks=[EarlyStopping(patience=2)], validation_data=(np.array(X_val), y_val_dict))
 
             x_new, y_new = [], []  # Clear batch
 
