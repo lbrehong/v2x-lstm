@@ -29,7 +29,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from keras.callbacks import EarlyStopping, History, Callback
 from keras.models import load_model
 from data_preprocessing import preprocess_lstm_input, compute_pdr_rolling
-from model import build_model, predict_and_retrain, automatic_train, rmse, plot_losses
+from model import build_model, predict_and_retrain, automatic_train, rmse
 
 #%%
 TIMESTEPS = 10
@@ -363,15 +363,10 @@ if __name__ == "__main__":
     # Automatic retraining
     print("____________________________________________________")
     print("Automatic retraining.")
-    automatic_train(model_lstm, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "lstm" + "_" + RAT +  ".csv")
-    automatic_train(model_gru, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "gru" + "_" + RAT +  ".csv")
-    automatic_train(model_rnn, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "rnn" + "_" + RAT +  ".csv")
+    automatic_train(model_lstm, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "lstm" + "_" + RAT +  ".csv", RAT, "lstm")
+    automatic_train(model_gru, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "gru" + "_" + RAT +  ".csv", RAT, "gru")
+    automatic_train(model_rnn, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "rnn" + "_" + RAT +  ".csv", RAT, "rnn")
 
-
-    # Plot losses
-    plot_losses(history_lstm)
-    plot_losses(history_gru)
-    plot_losses(history_rnn)
 
 #%%
 

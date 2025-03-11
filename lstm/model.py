@@ -1,4 +1,6 @@
 import numpy as np
+import os
+import time
 import keras
 import pandas as pd
 import tensorflow.keras.backend as K
@@ -11,6 +13,10 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 #%%
+
+MODEL_DIR = "models"
+
+
 ### Define loss function
 def rmse(y_true, y_pred):
     y_true = K.cast(y_true, np.float32) # Ensure same type because auto-casting pulls float64
@@ -96,7 +102,7 @@ def generate_new_measurement(x_new_data, y_new_data, index):
     return x_new.reshape(1, *x_new.shape), y_new.reshape(1, *y_new.shape)
 
 #%%
-def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validation=0.15, log_file="prediction_log.csv"):
+def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validation=0.15, log_file="prediction_log.csv", rat="dsrc", type="lstm"):
     with open(log_file, "w") as f:
         f.write("latitude,longitude,pred_latency,actual_latency,rmse_latency,pred_pdr,actual_pdr,rmse_pdr" + "\n")
 
@@ -152,14 +158,8 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
                 f.write(entry + "\n")
         log_entries = []
 
+    save_path = os.path.join(MODEL_DIR, "retrained_" + type + "_" + rat + str(int(time.time())) + ".keras")
+    model.save(save_path)
+    print(f"______ Model saved to {save_path}")
 
 #%%
-def plot_losses(history):
-    # Plot Training & Validation Loss
-    plt.plot(history.history['loss'], label='Training Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.title('Model Training vs Validation Loss')
-    plt.show()
