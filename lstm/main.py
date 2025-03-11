@@ -29,7 +29,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from keras.callbacks import EarlyStopping, History, Callback
 from keras.models import load_model
 from data_preprocessing import preprocess_lstm_input, compute_pdr_rolling
-from model import build_lstm_model, build_gru_model, build_rnn_model, predict_and_retrain, automatic_train, rmse, plot_losses
+from model import build_model, predict_and_retrain, automatic_train, rmse, plot_losses
 
 #%%
 TIMESTEPS = 10
@@ -50,28 +50,54 @@ MIN_LON, MAX_LON = 1.463952, 1.472176
 
 #%%
 class MetricsLogger(Callback):
-    def __init__(self, filename):
+    def __init__(self, filename, rat):
         super().__init__()
         self.filename = filename
+        self.rat = rat
 
     def on_train_begin(self, logs=None):
-        with open(self.filename + "_" + RAT + "_training_log.csv", mode='w', newline='') as file:
+        with open(f"{self.filename}_{self.rat}_training_log.csv", mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["Epoch", "Time (seconds)", "Train Loss", "Val Loss", "Train RMSE", "Val RMSE"])
+            writer.writerow(["Epoch", "Time (seconds)",
+                             "Train Loss (Latency)", "Train Loss (PDR)", "Total Train Loss",
+                             "Val Loss (Latency)", "Val Loss (PDR)", "Total Val Loss",
+                             "Train RMSE (Latency)", "Train RMSE (PDR)", "Total Train RMSE",
+                             "Val RMSE (Latency)", "Val RMSE (PDR)", "Total Val RMSE"])
 
     def on_epoch_begin(self, epoch, logs=None):
         self.start_time = time.time()
 
     def on_epoch_end(self, epoch, logs=None):
         epoch_time = time.time() - self.start_time
-        train_loss = logs.get("loss")
-        val_loss = logs.get("val_loss")
-        train_rmse = np.sqrt(train_loss) if train_loss else None
-        val_rmse = np.sqrt(val_loss) if val_loss else None
 
-        with open(self.filename + "_" + RAT + "_training_log.csv", mode='a', newline='') as file:
+        # Retrieve losses separately for latency and PDR
+        train_loss_latency = logs.get("latency_ms_loss")
+        train_loss_pdr = logs.get("pdr_loss")
+        total_train_loss = logs.get("loss")
+
+        val_loss_latency = logs.get("val_latency_ms_loss")
+        val_loss_pdr = logs.get("val_pdr_loss")
+        total_val_loss = logs.get("val_loss")
+
+        # Compute RMSE separately for each target
+        train_rmse_latency = np.sqrt(train_loss_latency) if train_loss_latency else None
+        train_rmse_pdr = np.sqrt(train_loss_pdr) if train_loss_pdr else None
+        total_train_rmse = np.sqrt(total_train_loss) if total_train_loss else None
+
+        val_rmse_latency = np.sqrt(val_loss_latency) if val_loss_latency else None
+        val_rmse_pdr = np.sqrt(val_loss_pdr) if val_loss_pdr else None
+        total_val_rmse = np.sqrt(total_val_loss) if total_val_loss else None
+
+        # Write to log file
+        with open(f"{self.filename}_{self.rat}_training_log.csv", mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([epoch + 1, epoch_time, train_loss, val_loss, train_rmse, val_rmse])
+            writer.writerow([
+                epoch + 1, epoch_time,
+                train_loss_latency, train_loss_pdr, total_train_loss,
+                val_loss_latency, val_loss_pdr, total_val_loss,
+                train_rmse_latency, train_rmse_pdr, total_train_rmse,
+                val_rmse_latency, val_rmse_pdr, total_val_rmse
+            ])
 
 
 #%%
@@ -240,6 +266,17 @@ if __name__ == "__main__":
         print("Preprocessed data saved! " + RAT + "_lstm_data.npz")
 
 
+
+    # Split y data into two separate columns for the two target values
+    y_train_dict = {
+        "latency_ms": y_train[:, 0],  # Extract latency values
+        "pdr": y_train[:, 1]  # Extract PDR values
+    }
+    y_new_data_dict = {
+        "latency_ms": y_new_data[:, 0],  # Extract latency values
+        "pdr": y_new_data[:, 1]  # Extract PDR values
+    }
+
     # Load existing model or train new one
     # Check for consistency of arguments
     if LOAD and os.path.exists(MODEL_PATH):
@@ -273,9 +310,9 @@ if __name__ == "__main__":
         elif not os.path.exists(MODEL_PATH):
             print("___ No model found. Building...")
 
-        model_lstm = build_lstm_model(TIMESTEPS, FEATURES)
-        model_gru = build_gru_model(TIMESTEPS, FEATURES)
-        model_rnn = build_rnn_model(TIMESTEPS, FEATURES)
+        model_lstm = build_model("lstm", TIMESTEPS, FEATURES)
+        model_gru = build_model("gru", TIMESTEPS, FEATURES)
+        model_rnn = build_model("rnn", TIMESTEPS, FEATURES)
         # model.summary() # Print model summary
         early_stopping = EarlyStopping(monitor='loss', patience=5,
                                        restore_best_weights=True)  # Stop training if loss does not improve
@@ -283,20 +320,20 @@ if __name__ == "__main__":
 
         print("___ Initial training...")
         print("______ LSTM")
-        metrics_logger = MetricsLogger("lstm")
-        history_lstm = model_lstm.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[metrics_logger,early_stopping], validation_split=VALIDATION_SPLIT, verbose=1)
+        metrics_logger = MetricsLogger("lstm", RAT)
+        history_lstm = model_lstm.fit(X_train, y_train_dict, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[metrics_logger,early_stopping], validation_split=VALIDATION_SPLIT, verbose=1)
         save_path = os.path.join(MODEL_DIR, "lstm_" + RAT + "_" + str(int(time.time())) + ".keras")
         model_lstm.save(save_path)
         print(f"______ Model saved to {save_path}")
         print("______ GRU")
-        metrics_logger = MetricsLogger("gru")
-        history_gru = model_gru.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[metrics_logger,early_stopping], validation_split=VALIDATION_SPLIT, verbose=1)
+        metrics_logger = MetricsLogger("gru", RAT)
+        history_gru = model_gru.fit(X_train, y_train_dict, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[metrics_logger,early_stopping], validation_split=VALIDATION_SPLIT, verbose=1)
         save_path = os.path.join(MODEL_DIR, "gru_" + RAT + "_" + str(int(time.time())) + ".keras")
         model_gru.save(save_path)
         print(f"______ Model saved to {save_path}")
         print("______ RNN")
-        metrics_logger = MetricsLogger("rnn")
-        history_rnn = model_rnn.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[metrics_logger,early_stopping], validation_split=VALIDATION_SPLIT, verbose=1)
+        metrics_logger = MetricsLogger("rnn", RAT)
+        history_rnn = model_rnn.fit(X_train, y_train_dict, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[metrics_logger,early_stopping], validation_split=VALIDATION_SPLIT, verbose=1)
         save_path = os.path.join(MODEL_DIR, "rnn_" + RAT + "_" + str(int(time.time())) + ".keras")
         model_rnn.save(save_path)
         print(f"______ Model saved to {save_path}")
@@ -331,9 +368,9 @@ if __name__ == "__main__":
     # Automatic retraining
     print("____________________________________________________")
     print("Automatic retraining.")
-    automatic_train(model_lstm, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "lstm" + "_" + RAT +  ".csv")
-    automatic_train(model_gru, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "gru" + "_" + RAT +  ".csv")
-    automatic_train(model_rnn, X_new_data, y_new_data, 32, 500, 0.15, "prediction_log_" + "rnn" + "_" + RAT +  ".csv")
+    automatic_train(model_lstm, X_new_data, y_new_data_dict, 32, 500, 0.15, "prediction_log_" + "lstm" + "_" + RAT +  ".csv")
+    automatic_train(model_gru, X_new_data, y_new_data_dict, 32, 500, 0.15, "prediction_log_" + "gru" + "_" + RAT +  ".csv")
+    automatic_train(model_rnn, X_new_data, y_new_data_dict, 32, 500, 0.15, "prediction_log_" + "rnn" + "_" + RAT +  ".csv")
 
 
     # Plot losses

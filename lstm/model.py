@@ -16,38 +16,29 @@ def rmse(y_true, y_pred):
     y_true = K.cast(y_true, np.float32) # Ensure same type because auto-casting pulls float64
     return K.sqrt(K.mean(K.square(y_pred - y_true)))
 
-# Define LSTM model
-def build_lstm_model(timesteps, features):
-    input_shape = (timesteps, features)  # Replace with the number of timesteps, and feature count
-    model = Sequential([
-        LSTM(64, activation='tanh', return_sequences=False, input_shape=input_shape),
-        Dense(32, activation='relu'),
-        Dense(2)  # Output is a double target value (e.g., throughput and PDR)
-    ])
-    model.compile(Adam(learning_rate=0.001), loss='mse', metrics=[rmse])
+
+# Define model
+def build_model(type, timesteps, features):
+    input_layer = Input(shape=(timesteps, features)) # Input layer
+
+    if type == "lstm":
+        rnn_layer = LSTM(64, return_sequences=False)(input_layer) # LSTM layer
+    elif type == "gru":
+        rnn_layer = GRU(64, return_sequences=False)(input_layer) # GRU layer
+    elif type == "rnn":
+        rnn_layer = SimpleRNN(64, return_sequences=False)(input_layer) # SimpleRNN layer
+    else:
+        raise ValueError("Unknown model type")
+
+    dense_layer = Dense(32, activation='relu')(rnn_layer) # Hidden Dense layer
+    latency_output = Dense(1, name="latency_ms")(dense_layer) # Output layer for latency
+    pdr_output = Dense(1, name="pdr")(dense_layer) # Output layer for PDR
+
+    model = Model(inputs=input_layer, outputs=[latency_output, pdr_output])
+    model.compile(Adam(learning_rate=0.001), loss={'latency_ms': 'mse', 'pdr': 'mse'}, metrics={'latency_ms': [rmse], 'pdr': [rmse]})
     return model
 
-# Define GRU model
-def build_gru_model(timesteps, features):
-    input_shape = (timesteps, features)  # Replace with the number of timesteps, and feature count
-    model = Sequential([
-        GRU(64, activation='tanh', return_sequences=False, input_shape=input_shape),
-        Dense(32, activation='relu'),
-        Dense(2)  # Output is a double target value (e.g., throughput and PDR)
-    ])
-    model.compile(Adam(learning_rate=0.001), loss='mse', metrics=[rmse])
-    return model
 
-# Define RNN model
-def build_rnn_model(timesteps, features):
-    input_shape = (timesteps, features)  # Replace with the number of timesteps, and feature count
-    model = Sequential([
-        SimpleRNN(64, activation='tanh', return_sequences=False, input_shape=input_shape),
-        Dense(32, activation='relu'),
-        Dense(2)  # Output is a double target value (e.g., throughput and PDR)
-    ])
-    model.compile(Adam(learning_rate=0.001), loss='mse', metrics=[rmse])
-    return model
 
 #%%
 ### Define data stream generator
