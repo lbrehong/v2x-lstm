@@ -190,7 +190,7 @@ if __name__ == "__main__":
             new_file = find_files_with_string(PATH_NEW, "trim_dsrc")[0]
     elif RAT == "5g":
         FEATURES = 6
-        TX_INTERVAL_MS = 50
+        TX_INTERVAL_MS = 46
         if PATH:
             files = find_files_with_string(PATH, "trim_5g")
             new_file = find_files_with_string(PATH_NEW, "trim_5g")[0]
