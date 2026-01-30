@@ -1,3 +1,18 @@
+"""
+Raw V2X and 5G log file trimming and preprocessing.
+
+This module processes raw log files from vehicular network experiments,
+extracting relevant fields and performing necessary corrections:
+
+- 5G SA: Clock drift compensation via linear regression, SINR/RSRP extraction
+- PC5/C-V2X: Latency and GPS extraction from sidelink logs
+- DSRC: Power level extraction with GPS matching from PC5/5G data
+
+The output files are standardized CSVs ready for the prediction pipeline.
+
+Usage:
+    python trimmers-combined.py --folder /path/to/raw_logs
+"""
 import re
 import os
 import argparse
@@ -9,33 +24,88 @@ import numpy as np
 from config import MIN_LAT, MIN_LON
 from utils import find_files_with_string
 
-# Drift compensation parameters (dataset-specific)
-XMIN, XMAX, TH = 1.862, 1.921, -1.6  # Dataset 05
+# Drift compensation parameters (calibrated per dataset)
+# XMIN, XMAX: latency range for scaling; TH: threshold for drift calculation
+XMIN, XMAX, TH = 1.862, 1.921, -1.6  # Calibrated for Dataset 05
 
 
 def calculate_coefficient(latencies, tx_seq_nums):
-    """Calculate drift compensation coefficient using linear regression."""
+    """
+    Calculate clock drift coefficient using linear regression.
+
+    Clock drift occurs when transmitter and receiver clocks are not
+    synchronized, causing measured latency to increase/decrease linearly
+    over time.
+
+    Args:
+        latencies: Array of measured latency values (filtered for outliers)
+        tx_seq_nums: Corresponding sequence numbers
+
+    Returns:
+        Drift coefficient (slope) in ms per packet
+    """
     X = np.array(tx_seq_nums).reshape(-1, 1)
     y = np.array(latencies)
     model = LinearRegression()
     model.fit(X, y)
     coefficient = model.coef_[0]
-    print(f"The coefficient is: {coefficient}")
+    print(f"Clock drift coefficient: {coefficient:.6f} ms/packet")
     return coefficient
 
 
 def compensate_drift(data, seqnum, drift=0.0):
-    """Compensate for clock drift in latency measurements."""
+    """
+    Apply drift compensation to raw latency measurement.
+
+    Args:
+        data: Raw latency value (negative due to measurement convention)
+        seqnum: Packet sequence number
+        drift: Drift coefficient from calculate_coefficient()
+
+    Returns:
+        Drift-compensated latency value
+    """
     return -(data + seqnum * abs(drift))
 
 
 def scale_values(data, xmin=XMIN, xmax=XMAX, a=16.0, b=45.0):
-    """Scale values to target range."""
+    """
+    Scale latency values from measured range to expected range.
+
+    Uses min-max normalization to transform values from [xmin, xmax]
+    to [a, b] range based on expected latency bounds.
+
+    Args:
+        data: Input value to scale
+        xmin: Minimum of source range (calibrated per dataset)
+        xmax: Maximum of source range (calibrated per dataset)
+        a: Minimum of target range (default: 16ms)
+        b: Maximum of target range (default: 45ms)
+
+    Returns:
+        Scaled latency value in target range
+    """
     return a + (data - xmin) * (b - a) / (xmax - xmin)
 
 
 def trim_sa(file_list, output_file, path):
-    """Trim and process 5G SA log files."""
+    """
+    Process 5G Standalone (SA) log files with drift compensation.
+
+    Performs:
+        1. Two-pass processing: first pass calculates drift coefficient
+        2. Applies drift compensation and scaling to latency
+        3. Extracts SINR and RSRP signal quality metrics
+        4. Builds GPS lookup table for DSRC matching
+
+    Args:
+        file_list: List of 5G log filenames to process
+        output_file: Path for output trimmed CSV
+        path: Directory containing input files
+
+    Returns:
+        Dictionary mapping timestamps to (latitude, longitude) tuples
+    """
     input_file = os.path.join(path, file_list[0])
     out = 0
     sa_data = {}
@@ -96,7 +166,20 @@ def trim_sa(file_list, output_file, path):
 
 
 def trim_pc5(input_file, output_file):
-    """Trim and process PC5/C-V2X log files."""
+    """
+    Process PC5/C-V2X sidelink log files.
+
+    Extracts latency and GPS coordinates from PC5 mode 4 logs.
+    Filters out invalid entries (zero latency, incomplete fields).
+
+    Args:
+        input_file: Path to raw PC5 log file
+        output_file: Path for output trimmed CSV
+
+    Returns:
+        Tuple of (line_count, gps_dict) where gps_dict maps
+        timestamps to (latitude, longitude) tuples
+    """
     out = 0
     pc5_data = {}
 
@@ -128,7 +211,21 @@ def trim_pc5(input_file, output_file):
 
 
 def trim_dsrc(input_file, output_file, pc5_data, sa_data):
-    """Trim and process DSRC log files."""
+    """
+    Process DSRC (802.11p) log files with GPS matching.
+
+    DSRC logs do not contain GPS coordinates directly. This function
+    matches timestamps with PC5 or 5G data to obtain location.
+
+    Args:
+        input_file: Path to raw DSRC log file
+        output_file: Path for output trimmed CSV
+        pc5_data: GPS lookup dictionary from PC5 processing
+        sa_data: GPS lookup dictionary from 5G processing
+
+    Returns:
+        Number of lines written to output file
+    """
     out = 0
 
     with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
@@ -171,7 +268,15 @@ def trim_dsrc(input_file, output_file, pc5_data, sa_data):
 
 
 def get_first_timestamp(file):
-    """Get the first timestamp from a file for sorting."""
+    """
+    Extract the first timestamp from a trimmed file for chronological sorting.
+
+    Args:
+        file: Path to trimmed CSV file
+
+    Returns:
+        First timestamp as float, or infinity if not found
+    """
     with open(file, 'r') as f:
         for line in f:
             if line[0].isdigit():
@@ -180,7 +285,13 @@ def get_first_timestamp(file):
 
 
 def append_files(output_file, files):
-    """Append multiple trimmed files into one with header."""
+    """
+    Combine multiple trimmed files into a single CSV with header.
+
+    Args:
+        output_file: Path for combined output file
+        files: List of trimmed file paths to concatenate
+    """
     with open(output_file, 'w') as outfile:
         if "dsrc" in output_file:
             outfile.write("tx_seq_num,tx_timestamp_ms,tx_latitude,tx_longitude,rsrp_1,rsrp_2,latency_ms\n")

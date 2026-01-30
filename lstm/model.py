@@ -1,3 +1,12 @@
+"""
+Neural network model definitions for RAT performance prediction.
+
+This module provides:
+- Dual-output RNN architectures (LSTM, GRU, SimpleRNN) for latency and PDR prediction
+- Custom RMSE metric for training evaluation
+- Data streaming generators for memory-efficient training
+- Incremental learning functions for online model updates
+"""
 import numpy as np
 import os
 import time
@@ -16,7 +25,16 @@ from config import (
 
 
 def rmse(y_true, y_pred):
-    """Root Mean Square Error loss function."""
+    """
+    Root Mean Square Error metric for Keras models.
+
+    Args:
+        y_true: Ground truth tensor
+        y_pred: Predicted values tensor
+
+    Returns:
+        RMSE value as a tensor
+    """
     y_true = K.cast(y_true, np.float32)
     return K.sqrt(K.mean(K.square(y_pred - y_true)))
 
@@ -59,17 +77,45 @@ def build_model(model_type, timesteps, features):
 
 
 class DataStreamGenerator(keras.utils.Sequence):
-    """Generator for streaming data to the model during training."""
+    """
+    Keras Sequence for streaming batched data during training.
+
+    Enables memory-efficient training by loading data in batches
+    rather than holding the entire dataset in memory.
+
+    Attributes:
+        X_data: Input feature sequences (N, timesteps, features)
+        y_data_dict: Dictionary of target arrays {'latency_ms': [...], 'pdr': [...]}
+        batch_size: Number of samples per batch
+    """
 
     def __init__(self, X_data, y_data_dict, batch_size=1):
+        """
+        Initialize the data generator.
+
+        Args:
+            X_data: Input sequences array
+            y_data_dict: Target values dictionary with 'latency_ms' and 'pdr' keys
+            batch_size: Batch size for training (default: 1)
+        """
         self.X_data = X_data
         self.y_data_dict = y_data_dict
         self.batch_size = batch_size
 
     def __len__(self):
+        """Return the number of batches per epoch."""
         return int(np.ceil(len(self.X_data) / self.batch_size))
 
     def __getitem__(self, idx):
+        """
+        Get a single batch of data.
+
+        Args:
+            idx: Batch index
+
+        Returns:
+            Tuple of (batch_x, batch_y_dict) for multi-output model
+        """
         batch_x = self.X_data[idx * self.batch_size:(idx + 1) * self.batch_size]
         batch_y_latency = self.y_data_dict["latency_ms"][idx * self.batch_size:(idx + 1) * self.batch_size]
         batch_y_pdr = self.y_data_dict["pdr"][idx * self.batch_size:(idx + 1) * self.batch_size]
@@ -78,31 +124,69 @@ class DataStreamGenerator(keras.utils.Sequence):
 
 
 def incremental_train(model, new_X, new_y, epochs=1, batch_size=1):
-    """Retrain model with new data incrementally."""
+    """
+    Retrain model incrementally with new data samples.
+
+    Used for online learning scenarios where the model is updated
+    as new data arrives.
+
+    Args:
+        model: Keras model to retrain
+        new_X: New input sequences
+        new_y: New target values dictionary
+        epochs: Number of training epochs (default: 1)
+        batch_size: Training batch size (default: 1)
+    """
     print("Retraining with new data...")
     generator = DataStreamGenerator(new_X, new_y, batch_size=batch_size)
     model.fit(generator, epochs=epochs, verbose=1, callbacks=[EarlyStopping(patience=2)])
 
 
 def predict_and_retrain(model, x_data, y_data, steps, start=0):
-    """Online prediction and update workflow."""
+    """
+    Online prediction and update workflow for step-by-step learning.
+
+    Processes data one sample at a time, making predictions and
+    immediately retraining the model with the actual values.
+
+    Args:
+        model: Keras model to use
+        x_data: Input data array
+        y_data: Target data array
+        steps: Number of steps to process
+        start: Starting index (default: 0)
+    """
     for step in range(start, steps):
         new_x, new_y = generate_new_measurement(x_data, y_data, step)
         prediction = model.predict(new_x)
         print(prediction[0])
         print(new_y[0])
-        print(f"Step {step + 1}: Predicted: {prediction[0, 0]:.4f},{prediction[0, 1]:.4f}, Actual: {new_y[0, 0]:.4f},{new_y[0, 1]:.4f}")
+        print(f"Step {step + 1}: Predicted: {prediction[0, 0]:.4f},{prediction[0, 1]:.4f}, "
+              f"Actual: {new_y[0, 0]:.4f},{new_y[0, 1]:.4f}")
 
-        print(f"___ Retraining model with new data at step {step + 1}...")
+        print(f"Retraining model with new data at step {step + 1}...")
         incremental_train(model, new_x, new_y)
 
-    print("___ Updated model ready for future predictions.")
+    print("Updated model ready for future predictions.")
 
 
 def generate_new_measurement(x_new_data, y_new_data, index):
-    """Grab new data for predicting and re-training."""
+    """
+    Extract a single sample from the dataset for prediction/retraining.
+
+    Args:
+        x_new_data: Input sequences array
+        y_new_data: Target values array
+        index: Sample index to extract
+
+    Returns:
+        Tuple of (x_sample, y_sample) reshaped for model input
+
+    Raises:
+        IndexError: If index exceeds available data
+    """
     if index >= len(x_new_data):
-        raise IndexError("!!! No more new measurements available.")
+        raise IndexError("No more new measurements available in dataset.")
 
     x_new = x_new_data[index]
     y_new = y_new_data[index]
@@ -112,56 +196,78 @@ def generate_new_measurement(x_new_data, y_new_data, index):
 def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validation=0.15,
                     log_file="prediction_log.csv", rat="dsrc", model_type="lstm"):
     """
-    Automatic training with logging and periodic model updates.
+    Automatic incremental training with prediction logging.
+
+    Implements a streaming learning approach where:
+    1. Predictions are made on incoming data
+    2. Results are logged with actual values and errors
+    3. Model is retrained every N samples
+    4. Validation set is held out for monitoring
 
     Args:
-        model: Keras model to train
-        X_new_data: New input data
-        y_new_data: New target data
-        batch_size: Training batch size
-        N: Number of samples before retraining
-        validation: Validation split ratio
-        log_file: Path to log file
-        rat: RAT type
-        model_type: Model type for saving
+        model: Keras model to train and evaluate
+        X_new_data: New input sequences (N, timesteps, features)
+        y_new_data: New target values (N, 2) for latency and PDR
+        batch_size: Training batch size (default: 32)
+        N: Retraining interval - number of samples before each update (default: 500)
+        validation: Fraction of data to hold out for validation (default: 0.15)
+        log_file: Path to CSV file for logging predictions
+        rat: RAT type identifier for model naming
+        model_type: Model architecture name for file naming
+
+    Output:
+        Saves retrained model and writes prediction log to CSV
     """
+    # Initialize scalers for inverse transformation of predictions
     gps_scaler = create_gps_scaler()
     latency_scaler = create_latency_scaler()
 
+    # Initialize prediction log file with header
     with open(log_file, "w") as f:
         f.write("latitude,longitude,pred_latency,actual_latency,rmse_latency,pred_pdr,actual_pdr,rmse_pdr\n")
 
+    # Buffers for accumulating samples before retraining
     x_new, y_new = [], []
     log_entries = []
-    validation_split = int(validation * len(X_new_data))
 
+    # Split off validation set from the beginning of data
+    validation_split = int(validation * len(X_new_data))
     X_val, y_val = X_new_data[:validation_split], y_new_data[:validation_split]
     X_new_data, y_new_data = X_new_data[validation_split:], y_new_data[validation_split:]
 
+    # Process each sample in streaming fashion
     for i in tqdm(range(len(X_new_data)), desc="Processing new data", unit="seq"):
         x_new.append(X_new_data[i])
         y_new.append(y_new_data[i])
 
+        # Trigger retraining every N samples
         if len(x_new) >= N:
+            # Log predictions for all accumulated samples
             for j in range(len(x_new)):
+                # Extract GPS coordinates from last timestep (inverse transform)
                 scaled_lat_lon = x_new[j][-1][:2].reshape(1, -1)
                 lat, lon = gps_scaler.inverse_transform(scaled_lat_lon)[0]
 
-                pred = model.predict(np.expand_dims(x_new[j], axis=0))
+                # Make prediction
+                pred = model.predict(np.expand_dims(x_new[j], axis=0), verbose=0)
 
+                # Extract and denormalize predictions
                 pred_latency, pred_pdr = pred[0].flatten()[0], pred[1].flatten()[0]
                 pred_latency = latency_scaler.inverse_transform(np.array(pred_latency).reshape(-1, 1))[0][0]
-                pred_pdr = max(0.0, min(pred_pdr, 1.0))
+                pred_pdr = max(0.0, min(pred_pdr, 1.0))  # Clamp PDR to [0, 1]
 
+                # Extract and denormalize actual values
                 actual_latency, actual_pdr = y_new[j][0], y_new[j][1]
                 actual_latency = latency_scaler.inverse_transform(np.array(actual_latency).reshape(-1, 1))[0][0]
                 actual_pdr = max(0.0, min(actual_pdr, 1.0))
 
+                # Compute absolute errors
                 rmse_latency = abs(pred_latency - actual_latency)
                 rmse_pdr = abs(pred_pdr - actual_pdr)
 
                 log_entries.append(f"{lat},{lon},{pred_latency},{actual_latency},{rmse_latency},{pred_pdr},{actual_pdr},{rmse_pdr}")
 
+            # Prepare targets for multi-output model training
             y_new_dict = {
                 "latency_ms": np.array(y_new)[:, 0],
                 "pdr": np.array(y_new)[:, 1]
@@ -172,17 +278,21 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
                 "pdr": np.array(y_val)[:, 1]
             }
 
+            # Retrain model with accumulated samples
             generator = DataStreamGenerator(x_new, y_new_dict, batch_size)
             model.fit(generator, epochs=1, verbose=1, callbacks=[EarlyStopping(patience=2)],
                       validation_data=(np.array(X_val), y_val_dict))
 
+            # Clear buffers for next batch
             x_new, y_new = [], []
 
+            # Flush log entries to file
             with open(log_file, "a") as f:
                 for entry in log_entries:
                     f.write(entry + "\n")
             log_entries = []
 
+    # Save final retrained model with timestamp
     save_path = os.path.join(MODEL_DIR, f"retrained_{model_type}_{rat}_{int(time.time())}.keras")
     model.save(save_path)
-    print(f"______ Model saved to {save_path}")
+    print(f"Retrained model saved to {save_path}")

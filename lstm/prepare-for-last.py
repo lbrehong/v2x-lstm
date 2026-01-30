@@ -1,6 +1,18 @@
 """
 Cross-RAT data matching by GPS coordinates.
-Matches 5G primary data with DSRC and PC5 data based on location.
+
+This module aligns data from different RATs (5G, DSRC, PC5) based on
+GPS location, enabling fair comparison of QoS metrics at the same
+physical positions.
+
+The matching process:
+1. Uses 5G data as the primary reference (highest sampling rate)
+2. For each 5G GPS point, finds corresponding DSRC/PC5 measurements
+3. Uses progressive tolerance expansion if exact match not found
+4. Creates unified dataset with all RATs at matching locations
+
+Usage:
+    python prepare-for-last.py --input /path/to/trimmed_data
 """
 import pandas as pd
 import numpy as np
@@ -10,14 +22,36 @@ import argparse
 from config import TX_INTERVAL_MS, PDR_WINDOW
 from data_preprocessing import compute_pdr_rolling
 
-# Matching parameters
-PRIMARY = "5g.csv"
-CSV = ["dsrc.csv", "pc5.csv"]
-TOLERANCE = 0.00001  # GPS coordinate tolerance
+# Input file configuration
+PRIMARY = "5g.csv"  # Reference RAT for GPS coordinates
+CSV = ["dsrc.csv", "pc5.csv"]  # Secondary RATs to match
+
+# GPS matching tolerance (approximately 1 meter at mid-latitudes)
+TOLERANCE = 0.00001
 
 
 def match_data(input_dir):
-    """Match primary 5G data with secondary DSRC/PC5 data."""
+    """
+    Match primary 5G data with secondary DSRC/PC5 data by GPS location.
+
+    Creates aligned datasets where each row represents the same physical
+    location across all RATs, enabling direct QoS comparison.
+
+    Process:
+        1. Load and filter 5G data (remove outliers, compute PDR)
+        2. Remove duplicate GPS points (random sample for latency)
+        3. For each secondary RAT, find matching points within tolerance
+        4. Expand tolerance progressively if no match found
+
+    Args:
+        input_dir: Directory containing trimmed CSV files (5g.csv, dsrc.csv, pc5.csv)
+
+    Outputs:
+        - matched_5g.csv: Deduplicated 5G data
+        - matched_dsrc.csv: DSRC data matched to 5G locations
+        - matched_pc5.csv: PC5 data matched to 5G locations
+        - super.csv: Combined reference with 5G latency/PDR
+    """
     # Load primary CSV
     primary_df = pd.read_csv(os.path.join(input_dir, PRIMARY))
     compute_pdr_rolling(primary_df, "tx_timestamp_ms", PDR_WINDOW, 46)

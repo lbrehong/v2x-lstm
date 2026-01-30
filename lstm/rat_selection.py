@@ -1,3 +1,18 @@
+"""
+RAT (Radio Access Technology) selection and analysis module.
+
+This module implements:
+- Predictive QoS-based RAT selection algorithm
+- Opportunistic (reactive) RAT selection baseline
+- Map visualization with Folium
+- Performance statistics and histogram generation
+- RMSE analysis and comparison tables
+
+Usage:
+    python rat_selection.py --input /path/to/csv_folder --model_type all
+    python rat_selection.py --input /path/to/csv --mode view
+    python rat_selection.py --input /path/to/csv --mode data
+"""
 import os
 import argparse
 import pandas as pd
@@ -17,7 +32,7 @@ from utils import get_latest_model
 from model import rmse, automatic_train
 from data_preprocessing import preprocess_lstm_input
 
-# Initialize scalers
+# Initialize scalers for coordinate and latency transformations
 gps_scaler = create_gps_scaler()
 latency_scaler = create_latency_scaler()
 
@@ -123,11 +138,20 @@ def select_best_rat(row, model_type):
     """
     Select the optimal RAT based on predicted QoS metrics.
 
+    Implements a reliability-first, latency-optimized selection algorithm:
+
     Algorithm:
-    1. Filter RATs with predicted PDR >= reliability threshold (0.99)
-    2. If none qualify, select RAT with highest actual PDR
-    3. Among qualified RATs, select lowest latency
-    4. Break ties by preferring 5G > PC5 > DSRC
+        1. Filter RATs with predicted PDR >= reliability threshold (0.99)
+        2. If none qualify, fall back to RAT with highest actual PDR
+        3. Among qualified RATs, select the one with lowest predicted latency
+        4. Break latency ties (within 1ms) by preferring 5G > PC5 > DSRC
+
+    Args:
+        row: DataFrame row containing prediction columns for all RATs
+        model_type: Model architecture name (lstm, gru, rnn)
+
+    Returns:
+        String identifier of selected RAT: 'dsrc', 'pc5', '5g', or 'NaN'
     """
     options = [
         ("dsrc", row[f"pred_latency_ms_dsrc_{model_type}"], row[f"pred_pdr_dsrc_{model_type}"], row["pdr_dsrc"]),
@@ -163,7 +187,24 @@ def select_best_rat(row, model_type):
 
 
 def opportunistic_best_rat(df):
-    """Select RAT using opportunistic algorithm (no prediction)."""
+    """
+    Select RAT using opportunistic (reactive) algorithm without prediction.
+
+    Baseline algorithm that selects RAT based on current observed metrics
+    rather than predictions. Implements a sticky policy to reduce handovers.
+
+    Algorithm:
+        1. Filter RATs with PDR > 5%
+        2. If currently on 5G and V2X options available, switch to lowest latency
+        3. Otherwise, stay on current RAT if still available
+        4. Fall back to 5G if available, else mark as unavailable
+
+    Args:
+        df: DataFrame with actual latency and PDR columns for all RATs
+
+    Returns:
+        DataFrame with 'Best_RAT_opp' column added
+    """
     best_rat_list = []
     previous_rat = "5g"
     for index, row in df.iterrows():

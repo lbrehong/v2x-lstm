@@ -80,47 +80,107 @@ MODELS = ["lstm", "gru", "rnn"]
 # =============================================================================
 # Scaler Factory Functions
 # =============================================================================
+# All scalers use fixed bounds (not data-driven) to ensure consistency
+# across training runs and enable proper inverse transformation of predictions.
+
+
 def create_gps_scaler():
-    """Create and fit GPS scaler with predefined bounds."""
+    """
+    Create GPS coordinate scaler for latitude/longitude normalization.
+
+    Uses fixed bounds based on Toulouse test area to ensure consistent
+    normalization across all datasets.
+
+    Returns:
+        Fitted MinMaxScaler for 2D GPS coordinates
+    """
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_LAT, MIN_LON], [MAX_LAT, MAX_LON]])
 
 
 def create_latency_scaler():
-    """Create and fit latency scaler with predefined bounds."""
+    """
+    Create latency scaler with expected measurement bounds.
+
+    Bounds (4-50ms) cover typical V2X latency range for all RATs.
+
+    Returns:
+        Fitted MinMaxScaler for latency values
+    """
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_LATENCY], [MAX_LATENCY]])
 
 
 def create_pdr_scaler():
-    """Create and fit PDR scaler with predefined bounds."""
+    """
+    Create PDR scaler for packet delivery rate normalization.
+
+    PDR is inherently bounded [0, 1], so scaler is identity transform.
+
+    Returns:
+        Fitted MinMaxScaler for PDR values
+    """
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_PDR], [MAX_PDR]])
 
 
 def create_throughput_scaler():
-    """Create and fit throughput scaler with predefined bounds."""
+    """
+    Create throughput scaler for data rate normalization.
+
+    Returns:
+        Fitted MinMaxScaler for throughput values (0-100 Mbps)
+    """
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_THROUGHPUT], [MAX_THROUGHPUT]])
 
 
 def create_sinr_5g_scaler():
-    """Create and fit 5G SINR scaler with predefined bounds."""
+    """
+    Create 5G SINR scaler for signal quality normalization.
+
+    SINR values from 5G modem are in proprietary units (200-375).
+
+    Returns:
+        Fitted MinMaxScaler for 5G SINR values
+    """
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_SINR_5G], [MAX_SINR_5G]])
 
 
 def create_rsrp_5g_scaler():
-    """Create and fit 5G RSRP scaler with predefined bounds."""
+    """
+    Create 5G RSRP scaler for reference signal power normalization.
+
+    RSRP typically ranges from -127 dBm (weak) to -67 dBm (strong).
+
+    Returns:
+        Fitted MinMaxScaler for 5G RSRP values
+    """
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_RSRP_5G], [MAX_RSRP_5G]])
 
 
 def create_rsrp_dsrc_scaler():
-    """Create and fit DSRC RSRP scaler with predefined bounds."""
+    """
+    Create DSRC RSRP scaler for 802.11p signal power normalization.
+
+    DSRC has wider power range than 5G due to different PHY.
+
+    Returns:
+        Fitted MinMaxScaler for DSRC RSRP values
+    """
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_RSRP_DSRC], [MAX_RSRP_DSRC]])
 
 
 def create_all_scalers():
-    """Create dictionary of all scalers for preprocessing."""
+    """
+    Create dictionary of all scalers for complete preprocessing pipeline.
+
+    GPS coordinates share a single 2D scaler to maintain spatial relationship.
+    Each other feature has its own independent scaler.
+
+    Returns:
+        Dictionary mapping column names to fitted MinMaxScaler objects
+    """
     gps_scaler = create_gps_scaler()
     return {
         'tx_latitude': gps_scaler,
-        'tx_longitude': gps_scaler,
+        'tx_longitude': gps_scaler,  # Same scaler as latitude for 2D transform
         'latency_ms': create_latency_scaler(),
         'throughput': create_throughput_scaler(),
         'pdr': create_pdr_scaler(),
