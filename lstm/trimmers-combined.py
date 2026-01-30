@@ -14,7 +14,8 @@ MIN_LAT, MAX_LAT = 43.554669, 43.568290
 MIN_LON, MAX_LON = 1.463952, 1.472176
 # XMIN, XMAX, TH = 0.704, 0.762, 0.3 #01 LATENCIES ARE BROKEN IN SOURCE FILE, IGNORE IT
 # XMIN, XMAX, TH = 0.704, 0.762, -0.69 #02
-XMIN, XMAX, TH = 1.301, 1.393, -1.05 #03
+# XMIN, XMAX, TH = 1.301, 1.393, -1.05 #03
+XMIN, XMAX, TH = 1.862, 1.921, -1.6 #05
 
 def find_files_with_string(directory, search_string):
     all_files = os.listdir(directory)  # Get all files and directories
@@ -225,8 +226,12 @@ if __name__ == "__main__":
         combined_out_pc5 += out_pc5
 
         rsu_id = file.split("_")[2]
-        log_dsrc = [f for f in files_dsrc if rsu_id in f][0]
-
+        try:
+            log_dsrc = [f for f in files_dsrc if rsu_id in f][0]
+        except IndexError:
+            print("No matching DSRC file found for ", file)
+            trimmed_files_pc5.append(os.path.join(PATH, output_file_pc5))
+            continue
         print("Trimming DSRC file ", log_dsrc)
         out_dsrc = trim_dsrc(os.path.join(PATH,log_dsrc), os.path.join(PATH,output_file_dsrc), pc5_data)
         print("Generated " + str(out_dsrc) + " lines for DSRC")

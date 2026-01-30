@@ -238,7 +238,7 @@ if __name__ == "__main__":
         df_new["tx_longitude"] = df_new["tx_longitude"].interpolate().bfill()
         # Compute PDR and add it to dataframe
         print("___ Time to compute PDR...")
-        compute_pdr_rolling(df_new, "tx_timestamp_ms", PDR_WINDOW, TX_INTERVAL_MS)
+        df_new = compute_pdr_rolling(df_new, "tx_timestamp_ms", PDR_WINDOW, TX_INTERVAL_MS)
 
 
     # Load or preprocess data

@@ -6,8 +6,8 @@ from tqdm import tqdm
 
 MIN_LAT, MAX_LAT = 43.554669, 43.568290
 MIN_LON, MAX_LON = 1.463952, 1.472176
-MIN_LATENCY, MAX_LATENCY = 4,50 # in ms
 MIN_THROUGHPUT, MAX_THROUGHPUT = 0, 100 # in Mbps
+MIN_LATENCY, MAX_LATENCY = 4,50 # in ms
 MIN_PDR, MAX_PDR = 0, 1
 MIN_SINR_5G, MAX_SINR_5G = 200, 375
 MIN_RSRP_5G, MAX_RSRP_5G = -127, -67
@@ -44,7 +44,7 @@ def compute_pdr_rolling(df, time_column, window_size=1, packet_interval_ms=20):
 
     for i,t in enumerate(timestamps):
         # Remove timestamps outside the 1s window
-        while rolling_window and rolling_window[0] < t - 1:
+        while rolling_window and rolling_window[0] < t - window_size:
             rolling_window.popleft()
         # Add current timestamp
         rolling_window.append(t)
@@ -122,8 +122,8 @@ def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
 
     # Normalize features and target values
     gps_scaler = MinMaxScaler(feature_range=(0, 1)).fit([[MIN_LAT, MIN_LON], [MAX_LAT, MAX_LON]])
-    latency_scaler = MinMaxScaler(feature_range=(0, 1)).fit([[MIN_LATENCY], [MAX_LATENCY]])
     throughput_scaler = MinMaxScaler(feature_range=(0, 1)).fit([[MIN_THROUGHPUT], [MAX_THROUGHPUT]])
+    latency_scaler = MinMaxScaler(feature_range=(0, 1)).fit([[MIN_LATENCY], [MAX_LATENCY]])
     pdr_scaler = MinMaxScaler(feature_range=(0, 1)).fit([[MIN_PDR], [MAX_PDR]])
     sinr_5g_scaler = MinMaxScaler(feature_range=(0, 1)).fit([[MIN_SINR_5G], [MAX_SINR_5G]])
     rsrp_5g_scaler = MinMaxScaler(feature_range=(0, 1)).fit([[MIN_RSRP_5G], [MAX_RSRP_5G]])
