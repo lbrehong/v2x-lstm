@@ -1,0 +1,29 @@
+# IDE
+.idea/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Output directory (CSV, JSON, PNG files)
+output/
+
+# Data files (legacy locations, prefer output/ directory)
+*.npz
+*.csv
+*.json
+*.png
+
+# Model files
+models/*.keras
+models/old/
+models/stash/
+models/good_1/
+
+# Backup directories
+bkp/
+*.bkp
+
+# Experiment directories
+10_03_singlemse/
+12_03-wrongpdr/

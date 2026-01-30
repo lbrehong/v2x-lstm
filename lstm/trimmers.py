@@ -2,9 +2,7 @@ import re
 import sys
 import argparse
 
-NAN = "NaN"
-MIN_LAT, MAX_LAT = 43.554669, 43.568290
-MIN_LON, MAX_LON = 1.463952, 1.472176
+from config import MIN_LAT, MIN_LON
 
 def trim_pc5(input_file, output_file):
     out = 0

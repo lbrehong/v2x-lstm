@@ -1,28 +1,20 @@
 import re
-import sys
 import os
 import argparse
-from statistics import linear_regression
 
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 import numpy as np
 
+from config import MIN_LAT, MIN_LON
+from utils import find_files_with_string
 
-NAN = "NaN"
-MIN_LAT, MAX_LAT = 43.554669, 43.568290
-MIN_LON, MAX_LON = 1.463952, 1.472176
-# XMIN, XMAX, TH = 0.704, 0.762, 0.3 #01 LATENCIES ARE BROKEN IN SOURCE FILE, IGNORE IT
-# XMIN, XMAX, TH = 0.704, 0.762, -0.69 #02
-# XMIN, XMAX, TH = 1.301, 1.393, -1.05 #03
-XMIN, XMAX, TH = 1.862, 1.921, -1.6 #05
+# Drift compensation parameters (dataset-specific)
+XMIN, XMAX, TH = 1.862, 1.921, -1.6  # Dataset 05
 
-def find_files_with_string(directory, search_string):
-    all_files = os.listdir(directory)  # Get all files and directories
-    matching_files = [f for f in all_files if search_string in f]  # Filter files
-    return matching_files
 
 def calculate_coefficient(latencies, tx_seq_nums):
+    """Calculate drift compensation coefficient using linear regression."""
     X = np.array(tx_seq_nums).reshape(-1, 1)
     y = np.array(latencies)
     model = LinearRegression()
@@ -31,26 +23,32 @@ def calculate_coefficient(latencies, tx_seq_nums):
     print(f"The coefficient is: {coefficient}")
     return coefficient
 
+
 def compensate_drift(data, seqnum, drift=0.0):
-    return -(data + seqnum*abs(drift))
+    """Compensate for clock drift in latency measurements."""
+    return -(data + seqnum * abs(drift))
+
 
 def scale_values(data, xmin=XMIN, xmax=XMAX, a=16.0, b=45.0):
+    """Scale values to target range."""
     return a + (data - xmin) * (b - a) / (xmax - xmin)
 
 
-def trim_sa(file_list, output_file):
-    input_file = os.path.join(PATH, file_list[0])
+def trim_sa(file_list, output_file, path):
+    """Trim and process 5G SA log files."""
+    input_file = os.path.join(path, file_list[0])
     out = 0
-    sa_data={}
+    sa_data = {}
     latencies = []
     tx_seq_nums = []
     saved_sinr = 0
     saved_rsrp = 0
     threshold = TH
+
     with open(input_file, 'r') as infile:
         for line in infile:
             if not line[0].isdigit():
-                continue  # Ignore non-digit starting lines
+                continue
             parts = line.strip().split(',')
             tx_seq_num = str(int(parts[0].strip()))
             latency = float(parts[4].strip())
@@ -62,25 +60,25 @@ def trim_sa(file_list, output_file):
         coefficient = calculate_coefficient(latencies, tx_seq_nums)
         if not coefficient:
             raise ValueError("Invalid coefficient value. Output file will be broken.")
-    else :
+    else:
         raise ValueError("Invalid coefficient value. Output file will be broken.")
 
     with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
-        # Write header
         outfile.write("tx_seq_num,tx_timestamp_ms,tx_latitude,tx_longitude,latency_ms,sinr,rsrp\n")
 
         for line in infile:
             if not line[0].isdigit():
-                continue  # Ignore non-digit starting lines
+                continue
 
             parts = line.strip().split(',')
             tx_seq_num = str(int(parts[0].strip()))
-            timestamp = str(float(parts[1].strip())*1000.0) # convert to ms
+            timestamp = str(float(parts[1].strip()) * 1000.0)
             latitude = parts[2].strip()
             longitude = parts[3].strip()
             latency_raw = parts[4].strip()
             latency = scale_values(compensate_drift(float(latency_raw), int(tx_seq_num), coefficient))
-            if parts[5].strip().startswith("N"): # NaN
+
+            if parts[5].strip().startswith("N"):
                 sinr = saved_sinr
                 rsrp = saved_rsrp
             else:
@@ -89,20 +87,23 @@ def trim_sa(file_list, output_file):
                 saved_sinr = sinr
                 saved_rsrp = rsrp
 
-            sa_data[int(float(timestamp))*1000] = (latitude, longitude)
+            sa_data[int(float(timestamp)) * 1000] = (latitude, longitude)
 
             outfile.write(f"{tx_seq_num},{timestamp},{latitude},{longitude},{latency},{sinr},{rsrp},0\n")
             out += 1
 
     return sa_data
 
+
 def trim_pc5(input_file, output_file):
+    """Trim and process PC5/C-V2X log files."""
     out = 0
-    pc5_data={}
+    pc5_data = {}
+
     with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
         for line in infile:
             if not line[0].isdigit():
-                continue  # Ignore non-digit starting lines
+                continue
 
             parts = line.strip().split(',')
 
@@ -111,90 +112,84 @@ def trim_pc5(input_file, output_file):
 
             latency = parts[10].strip()
             if latency.startswith("0"):
-                continue  # Skip malformed lines
+                continue
 
             tx_seq_num = str(int(parts[15].strip()))
-            tx_timestamp = str(float(parts[17].strip())/1000.0) # convert to ms
+            tx_timestamp = str(float(parts[17].strip()) / 1000.0)
             tx_latitude = parts[20].strip()
             tx_longitude = parts[21].strip()
 
-            pc5_data[int(float(tx_timestamp))//1000] = (tx_latitude, tx_longitude)
+            pc5_data[int(float(tx_timestamp)) // 1000] = (tx_latitude, tx_longitude)
 
             outfile.write(f"{tx_seq_num},{tx_timestamp},{tx_latitude},{tx_longitude},{latency}\n")
             out += 1
 
     return out, pc5_data
 
-def trim_dsrc(input_file, output_file, pc5_data=None):
+
+def trim_dsrc(input_file, output_file, pc5_data, sa_data):
+    """Trim and process DSRC log files."""
     out = 0
+
     with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
         for line in infile:
             parts = re.split(r'\s+', line.strip())
-            #if len(parts) != 17: #TODO uncomment after testing
             if len(parts) < 16 or len(parts) > 17:
-                continue  # Skip malformed lines and headers
-            #elif len(parts) == 16: #TODO uncomment after testing
-            #    print ("This DSRC logfile does not contain latency values. Are you sure you enabled the -g time flag when running llc test-tx?")
-            #    raise ValueError("Invalid log format, missing latency values. Output file will be broken.")
+                continue
 
-            tx_seq_num = str(int(parts[0])) # get rid of leading zeros
-            timestamp = str(float(parts[9])*1000.0) # convert to ms
+            tx_seq_num = str(int(parts[0]))
+            timestamp = str(float(parts[9]) * 1000.0)
             power_ant1 = parts[5]
             power_ant2 = parts[6]
             latency = parts[10]
 
-            if power_ant1.startswith("1"): # circumvent a bug where 16383.0 value is logged instead of -102.0 dBm
-                power_ant1="-102.0"
+            if power_ant1.startswith("1"):
+                power_ant1 = "-102.0"
 
-
-            ts = int(float(timestamp))//1000 # we transmitted every 100ms, we round up for every second
-            if ts not in pc5_data: # floor to nearest timestamp in ms
-                if ts+1 in pc5_data:
-                    latitude, longitude = pc5_data.get(ts+1, ("", ""))
-                elif ts-1 in pc5_data:
-                    latitude, longitude = pc5_data.get(ts-1, ("", ""))
+            ts = int(float(timestamp)) // 1000
+            if ts not in pc5_data:
+                if ts + 1 in pc5_data:
+                    latitude, longitude = pc5_data.get(ts + 1, ("", ""))
+                elif ts - 1 in pc5_data:
+                    latitude, longitude = pc5_data.get(ts - 1, ("", ""))
                 else:
-
                     if ts in sa_data:
                         latitude, longitude = sa_data.get(ts, ("", ""))
-                    elif ts+1 in sa_data:
-                        latitude, longitude = sa_data.get(ts+1, ("", ""))
-                    elif ts-1 in sa_data:
-                        latitude, longitude = sa_data.get(ts-1, ("", ""))
-
+                    elif ts + 1 in sa_data:
+                        latitude, longitude = sa_data.get(ts + 1, ("", ""))
+                    elif ts - 1 in sa_data:
+                        latitude, longitude = sa_data.get(ts - 1, ("", ""))
                     else:
                         latitude, longitude = MIN_LAT, MIN_LON
-
             else:
                 latitude, longitude = pc5_data.get(ts, ("", ""))
-            outfile.write(f"{tx_seq_num},{timestamp},{latitude},{longitude},{power_ant1},{power_ant2},{latency}\n")
 
+            outfile.write(f"{tx_seq_num},{timestamp},{latitude},{longitude},{power_ant1},{power_ant2},{latency}\n")
             out += 1
 
     return out
 
 
 def get_first_timestamp(file):
+    """Get the first timestamp from a file for sorting."""
     with open(file, 'r') as f:
         for line in f:
             if line[0].isdigit():
                 return float(line.split(',')[1])
     return float('inf')
 
+
 def append_files(output_file, files):
+    """Append multiple trimmed files into one with header."""
     with open(output_file, 'w') as outfile:
-        if output_file.__contains__("dsrc"):
-            # Write header
+        if "dsrc" in output_file:
             outfile.write("tx_seq_num,tx_timestamp_ms,tx_latitude,tx_longitude,rsrp_1,rsrp_2,latency_ms\n")
-        elif output_file.__contains__("pc5"):
-            # Write header
+        elif "pc5" in output_file:
             outfile.write("tx_seq_num,tx_timestamp_ms,tx_latitude,tx_longitude,latency_ms\n")
         for file in files:
             with open(file, 'r') as infile:
                 for line in infile:
                     outfile.write(line)
-
-
 
 
 if __name__ == "__main__":
@@ -211,18 +206,19 @@ if __name__ == "__main__":
     print("Matching PC5 files: ", files_pc5)
     print("Matching 5G files: ", files_5g)
 
-    sa_data = trim_sa(files_5g, os.path.join(PATH,"trim_5g.csv"))
+    sa_data = trim_sa(files_5g, os.path.join(PATH, "trim_5g.csv"), PATH)
 
     combined_out_pc5 = 0
     combined_out_dsrc = 0
     trimmed_files_pc5 = []
     trimmed_files_dsrc = []
+
     for i, file in enumerate(files_pc5):
         output_file_pc5 = f"trim_pc5_{i}.csv"
         output_file_dsrc = f"trim_dsrc_{i}.csv"
         print("Trimming PC5 file ", file)
-        out_pc5, pc5_data = trim_pc5(os.path.join(PATH,file), os.path.join(PATH,output_file_pc5))
-        print("Generated " + str(out_pc5) + " lines for PC5")
+        out_pc5, pc5_data = trim_pc5(os.path.join(PATH, file), os.path.join(PATH, output_file_pc5))
+        print(f"Generated {out_pc5} lines for PC5")
         combined_out_pc5 += out_pc5
 
         rsu_id = file.split("_")[2]
@@ -232,31 +228,18 @@ if __name__ == "__main__":
             print("No matching DSRC file found for ", file)
             trimmed_files_pc5.append(os.path.join(PATH, output_file_pc5))
             continue
-        print("Trimming DSRC file ", log_dsrc)
-        out_dsrc = trim_dsrc(os.path.join(PATH,log_dsrc), os.path.join(PATH,output_file_dsrc), pc5_data)
-        print("Generated " + str(out_dsrc) + " lines for DSRC")
-        combined_out_dsrc += out_dsrc
-        trimmed_files_pc5.append(os.path.join(PATH,output_file_pc5))
-        trimmed_files_dsrc.append(os.path.join(PATH,output_file_dsrc))
 
+        print("Trimming DSRC file ", log_dsrc)
+        out_dsrc = trim_dsrc(os.path.join(PATH, log_dsrc), os.path.join(PATH, output_file_dsrc), pc5_data, sa_data)
+        print(f"Generated {out_dsrc} lines for DSRC")
+        combined_out_dsrc += out_dsrc
+        trimmed_files_pc5.append(os.path.join(PATH, output_file_pc5))
+        trimmed_files_dsrc.append(os.path.join(PATH, output_file_dsrc))
 
     trimmed_files_pc5.sort(key=get_first_timestamp)
-    append_files(os.path.join(PATH,"trim_pc5.csv"), trimmed_files_pc5)
-    print("Combined trimmed PC5 files into combined_trimmed_pc5.csv. Total lines: ", combined_out_pc5)
+    append_files(os.path.join(PATH, "trim_pc5.csv"), trimmed_files_pc5)
+    print(f"Combined trimmed PC5 files into combined_trimmed_pc5.csv. Total lines: {combined_out_pc5}")
+
     trimmed_files_dsrc.sort(key=get_first_timestamp)
-    append_files(os.path.join(PATH,"trim_dsrc.csv"), trimmed_files_dsrc)
-    print("Combined trimmed DSRC files into combined_trimmed_dsrc.csv. Total lines: ", combined_out_dsrc)
-
-
-# TODO LIST:
-    # DONE Trim 5G SA to grab ABS value of SINR
-    # DONE Rescale 5G SA latencies
-    # DONE Handle NAN values in 5G SA
-    # DONE Look up all files in folder and process them
-    # DONE Combine PC5 and DSRC data from multiple APs, assume no overlap
-    # FIXED Generates only 1 line for DSRC
-
-    # DONE 03: find XMIN and XMAX, then rescale
-    # Get rid of 5G latency outliers after calculating PDR
-    # Merge 01 02 03 files for DSRC and PC5, but split between training and inferring sets
-    # Merge 02 and 03 files for 5G SA, but split between training and inferring sets
+    append_files(os.path.join(PATH, "trim_dsrc.csv"), trimmed_files_dsrc)
+    print(f"Combined trimmed DSRC files into combined_trimmed_dsrc.csv. Total lines: {combined_out_dsrc}")
