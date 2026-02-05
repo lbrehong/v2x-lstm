@@ -47,6 +47,21 @@ PDR_AVAILABILITY_THRESHOLD = 0.1  # Minimum PDR to consider RAT available
 LATENCY_TIE_MARGIN_MS = 1.0  # Latency difference to trigger tie-breaking
 
 # =============================================================================
+# Packet Size Bounds (for queue simulator integration)
+# =============================================================================
+PACKET_SIZE_BOUNDS = {
+    "dsrc": {"min": 100, "max": 1500, "levels": 8},
+    "pc5": {"min": 100, "max": 2000, "levels": 8},
+    "5g": {"min": 100, "max": 1400, "levels": 8},
+}
+
+# DTMC (Discrete Time Markov Chain) Packet Sizing Parameters
+DTMC_THRESHOLD_HIGH = 0.95  # PDR above this may increase packet size
+DTMC_THRESHOLD_LOW = 0.85   # PDR below this may decrease packet size
+DTMC_P_UP = 0.7             # Probability of increasing when PDR high
+DTMC_P_DOWN = 0.8           # Probability of decreasing when PDR low
+
+# =============================================================================
 # Feature Columns by RAT Type
 # =============================================================================
 FEATURE_COLS = {

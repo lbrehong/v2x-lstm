@@ -31,6 +31,7 @@ from config import (
 from utils import get_latest_model
 from model import rmse, automatic_train
 from data_preprocessing import preprocess_lstm_input
+from file_integration import process_batch
 
 # Initialize scalers for coordinate and latency transformations
 gps_scaler = create_gps_scaler()
@@ -554,8 +555,9 @@ def make_rmse_plot(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Select best RAT for given GPS coordinates")
     parser.add_argument('--input', type=str, required=True, help="Path to the input CSV folder")
-    parser.add_argument('--mode', type=str, help="Mode: empty for calculate, 'test' for GPS data, 'view' for visualize, 'data' for statistics")
+    parser.add_argument('--mode', type=str, help="Mode: empty for calculate, 'test' for GPS data, 'view' for visualize, 'data' for statistics, 'api_batch' for queue simulator integration")
     parser.add_argument('--model_type', type=str, help="RNN model type (lstm, gru, rnn, or all)")
+    parser.add_argument('--output', type=str, help="Output path for api_batch mode")
     args = parser.parse_args()
 
     INPUT = args.input
@@ -625,8 +627,17 @@ if __name__ == "__main__":
 
         m.save(os.path.join(OUTPUT_DIR, "gps_map_pc5_01.html"))
 
+    elif MODE == "api_batch":
+        # Queue simulator integration mode
+        # Outputs rat_decisions.csv with predictions for all RATs
+        output_path = args.output or os.path.join(OUTPUT_DIR, "rat_decisions.csv")
+        model_type = MODEL_TYPE or "lstm"
+        print(f"Processing {INPUT} with {model_type} model for queue simulator integration")
+        process_batch(INPUT, output_path, model_type)
+        print(f"RAT decisions saved to {output_path}")
+
     elif MODE:
-        raise ValueError("Invalid mode specified. test, view and <empty> are valid options.")
+        raise ValueError("Invalid mode specified. test, view, data, api_batch and <empty> are valid options.")
 
     else:
         raise ValueError("No model type specified. all, lstm, gru, rnn are valid options.")
