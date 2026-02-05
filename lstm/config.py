@@ -62,6 +62,53 @@ DTMC_P_UP = 0.7             # Probability of increasing when PDR high
 DTMC_P_DOWN = 0.8           # Probability of decreasing when PDR low
 
 # =============================================================================
+# PHY-Layer Configuration (3GPP/IEEE Standards)
+# =============================================================================
+# Resource Block-based capacity model for realistic simulation.
+# Uses fixed TX intervals (50 Hz = 20ms) with dynamic packet sizes.
+
+RAT_PHY_CONFIG = {
+    # 5G NR (FR1, 15 kHz SCS)
+    # 1 RB = 12 subcarriers × 14 OFDM symbols
+    # 1 slot = 1ms (15 kHz SCS), 1 frame = 10ms = 10 slots
+    # 20 MHz → 106 RBs, 64QAM CR 0.66 → ~158 bits/RB
+    "5g": {
+        "bandwidth_mhz": 20,
+        "rbs_available": 106,
+        "bits_per_rb": 158,              # 64QAM, code rate 0.66
+        "slots_per_frame": 10,
+        "frame_duration_ms": 10,
+        "max_bytes_per_tx": 40000,       # ~40 KB per 20ms TX interval
+        "queue_capacity_bytes": 80000,   # 2 TX intervals buffer
+        "base_latency_ms": 15.0,         # Typical E2E latency
+    },
+    # C-V2X PC5 Mode 4 (LTE Sidelink)
+    # 1 RB = 12 subcarriers × 7 symbols
+    # 1 subframe = 1ms (2 slots), 10 MHz → 50 RBs
+    # QPSK typical for V2X → ~24 bits/RB
+    "pc5": {
+        "bandwidth_mhz": 10,
+        "rbs_available": 50,
+        "bits_per_rb": 24,               # QPSK
+        "subframes_per_tx": 20,          # 20ms = 20 subframes
+        "max_bytes_per_tx": 6000,        # ~6 KB per 20ms TX interval
+        "queue_capacity_bytes": 12000,   # 2 TX intervals buffer
+        "base_latency_ms": 8.0,          # Typical E2E latency
+    },
+    # DSRC 802.11p
+    # 10 MHz OFDM channel, 6 Mbps (QPSK 1/2 coding) - conservative
+    "dsrc": {
+        "bandwidth_mhz": 10,
+        "data_rate_mbps": 6,             # Conservative QPSK 1/2
+        "max_bytes_per_tx": 15000,       # ~15 KB per 20ms TX interval
+        "queue_capacity_bytes": 30000,   # 2 TX intervals buffer
+        "base_latency_ms": 5.0,          # Typical E2E latency (contention-based)
+        "contention_window_min": 15,     # 802.11p CWmin
+        "contention_window_max": 1023,   # 802.11p CWmax
+    },
+}
+
+# =============================================================================
 # Feature Columns by RAT Type
 # =============================================================================
 FEATURE_COLS = {

@@ -45,7 +45,133 @@ from config import (
     PACKET_SIZE_BOUNDS,
     DTMC_THRESHOLD_HIGH, DTMC_THRESHOLD_LOW,
     DTMC_P_UP, DTMC_P_DOWN,
+    RAT_PHY_CONFIG,
+    TX_INTERVAL_MS,
 )
+
+
+# =============================================================================
+# PHY-Layer Helper Functions
+# =============================================================================
+
+def get_phy_config(rat: RATType) -> Dict:
+    """
+    Get PHY-layer configuration for a RAT.
+
+    Args:
+        rat: The RAT type
+
+    Returns:
+        PHY configuration dictionary, or defaults if RAT not found
+    """
+    if rat == RATType.UNAVAILABLE:
+        return RAT_PHY_CONFIG.get("5g", {})  # Default to 5G
+    return RAT_PHY_CONFIG.get(rat.value, RAT_PHY_CONFIG.get("5g", {}))
+
+
+def can_transmit(packet_size: int, rat: RATType) -> bool:
+    """
+    Check if packet fits within one TX interval capacity.
+
+    Args:
+        packet_size: Packet size in bytes
+        rat: Selected RAT type
+
+    Returns:
+        True if packet can be transmitted in one TX interval
+    """
+    config = get_phy_config(rat)
+    max_bytes = config.get("max_bytes_per_tx", 40000)
+    return packet_size <= max_bytes
+
+
+def get_queue_capacity_packets(rat: RATType, packet_size: int) -> int:
+    """
+    Calculate queue capacity in packets based on byte budget.
+
+    Args:
+        rat: Selected RAT type
+        packet_size: Current packet size in bytes
+
+    Returns:
+        Maximum number of packets the queue can hold
+    """
+    if packet_size <= 0:
+        return 100  # Default capacity
+    config = get_phy_config(rat)
+    capacity_bytes = config.get("queue_capacity_bytes", 80000)
+    return max(1, capacity_bytes // packet_size)
+
+
+def get_max_packet_size(rat: RATType) -> int:
+    """
+    Get maximum allowed packet size for a RAT.
+
+    Args:
+        rat: Selected RAT type
+
+    Returns:
+        Maximum packet size in bytes
+    """
+    config = get_phy_config(rat)
+    return config.get("max_bytes_per_tx", 40000)
+
+
+def calculate_tx_time_ms(packet_size: int, rat: RATType) -> float:
+    """
+    Calculate transmission time based on PHY characteristics.
+
+    For scheduled access (5G): TX time is based on resource allocation
+    For contention-based (DSRC): TX time includes contention delay
+
+    Args:
+        packet_size: Packet size in bytes
+        rat: Selected RAT type
+
+    Returns:
+        Transmission time in milliseconds
+    """
+    config = get_phy_config(rat)
+
+    if rat.value == "dsrc":
+        # DSRC: contention-based, use data rate
+        data_rate_bps = config.get("data_rate_mbps", 6) * 1e6
+        tx_time_ms = (packet_size * 8 / data_rate_bps) * 1000
+        # Add average contention delay (simplified model)
+        avg_backoff_ms = config.get("contention_window_min", 15) * 0.009 / 2
+        return tx_time_ms + avg_backoff_ms
+
+    elif rat.value == "pc5":
+        # PC5: semi-persistent scheduling, resource allocation
+        # Time based on subframe allocation
+        max_bytes = config.get("max_bytes_per_tx", 6000)
+        subframes = config.get("subframes_per_tx", 20)
+        # Proportion of TX interval used
+        proportion = min(1.0, packet_size / max_bytes)
+        return subframes * proportion
+
+    else:  # 5G
+        # 5G NR: scheduled, fast resource allocation
+        max_bytes = config.get("max_bytes_per_tx", 40000)
+        frame_duration = config.get("frame_duration_ms", 10)
+        slots = config.get("slots_per_frame", 10)
+        # Typically 1-2 slots needed
+        proportion = min(1.0, packet_size / max_bytes)
+        return frame_duration * proportion / slots * 2  # ~2 slots typical
+
+
+def get_base_latency_ms(rat: RATType) -> float:
+    """
+    Get base end-to-end latency for a RAT.
+
+    Args:
+        rat: Selected RAT type
+
+    Returns:
+        Base latency in milliseconds
+    """
+    config = get_phy_config(rat)
+    return config.get("base_latency_ms", 10.0)
 
 
 # =============================================================================
@@ -244,6 +370,7 @@ class SimulationMetrics:
     total_packets: int = 0
     successful_packets: int = 0
     failed_packets: int = 0
+    dropped_packets: int = 0  # Dropped due to queue overflow or size limit
     total_bytes_sent: int = 0
     successful_bytes: int = 0
 
@@ -253,10 +380,15 @@ class SimulationMetrics:
     mean_latency_ms: float = 0.0
     max_latency_ms: float = 0.0
     mean_queue_depth: float = 0.0
+    max_queue_depth: int = 0
 
     mean_packet_size: float = 0.0
     dtmc_increases: int = 0
     dtmc_decreases: int = 0
+
+    # PHY-layer metrics
+    mean_tx_time_ms: float = 0.0
+    capacity_limited_count: int = 0  # Packets capped at max TX capacity
 
     records: List[TransmissionRecord] = field(default_factory=list)
 
@@ -283,6 +415,7 @@ class SimulationMetrics:
             "total_packets": self.total_packets,
             "successful_packets": self.successful_packets,
             "failed_packets": self.failed_packets,
+            "dropped_packets": self.dropped_packets,
             "pdr": self.pdr,
             "total_bytes_sent": self.total_bytes_sent,
             "successful_bytes": self.successful_bytes,
@@ -291,9 +424,12 @@ class SimulationMetrics:
             "mean_latency_ms": self.mean_latency_ms,
             "max_latency_ms": self.max_latency_ms,
             "mean_queue_depth": self.mean_queue_depth,
+            "max_queue_depth": self.max_queue_depth,
             "mean_packet_size": self.mean_packet_size,
             "dtmc_increases": self.dtmc_increases,
             "dtmc_decreases": self.dtmc_decreases,
+            "mean_tx_time_ms": self.mean_tx_time_ms,
+            "capacity_limited_count": self.capacity_limited_count,
             **{f"rat_{rat.value}_count": count for rat, count in self.rat_usage.items()},
         }
 
@@ -308,6 +444,11 @@ class QueueSimulator:
 
     Implements the QueueSimulatorAPI interface for integration with
     JointController and RATSelectionAPI.
+
+    Includes PHY-layer constraints:
+    - Bounded queue capacity based on RAT characteristics
+    - Maximum packet size enforcement per TX interval
+    - Realistic transmission time calculation
     """
 
     def __init__(
@@ -316,6 +457,7 @@ class QueueSimulator:
         correction_exponent: float = 0.8,
         target_latency_ms: float = 20.0,
         target_pdr: float = 0.99,
+        enforce_phy_limits: bool = True,
     ):
         """
         Initialize queue simulator.
@@ -325,11 +467,13 @@ class QueueSimulator:
             correction_exponent: PDR correction power-law exponent
             target_latency_ms: Application latency requirement
             target_pdr: Application PDR requirement
+            enforce_phy_limits: Whether to enforce PHY-layer constraints
         """
         self.base_packet_size = base_packet_size
         self.correction_exponent = correction_exponent
         self.target_latency_ms = target_latency_ms
         self.target_pdr = target_pdr
+        self.enforce_phy_limits = enforce_phy_limits
 
         # DTMC sizers per RAT
         self.dtmc_sizers: Dict[RATType, DTMCPacketSizer] = {}
@@ -339,6 +483,7 @@ class QueueSimulator:
         # Current state
         self.current_rat: Optional[RATType] = None
         self.queue_depth = 0
+        self.queue_bytes = 0  # Track bytes in queue
         self.recent_pdrs: List[float] = []
         self.pdr_window = 20  # Window for trend calculation
 
@@ -381,6 +526,71 @@ class QueueSimulator:
             target_pdr=self.target_pdr,
         )
 
+    def get_queue_capacity(self, rat: Optional[RATType] = None) -> int:
+        """
+        Get queue capacity in packets for current or specified RAT.
+
+        Args:
+            rat: RAT type (uses current_rat if None)
+
+        Returns:
+            Queue capacity in packets
+        """
+        target_rat = rat or self.current_rat or RATType.FiveG
+        dtmc = self.dtmc_sizers.get(target_rat)
+        packet_size = dtmc.current_size if dtmc else self.base_packet_size
+        return get_queue_capacity_packets(target_rat, packet_size)
+
+    def can_enqueue(self, packet_size: int, rat: Optional[RATType] = None) -> bool:
+        """
+        Check if a packet can be added to the queue without overflow.
+
+        Args:
+            packet_size: Size of packet to enqueue
+            rat: RAT type (uses current_rat if None)
+
+        Returns:
+            True if packet can be enqueued
+        """
+        if not self.enforce_phy_limits:
+            return True
+
+        target_rat = rat or self.current_rat or RATType.FiveG
+        config = get_phy_config(target_rat)
+        capacity_bytes = config.get("queue_capacity_bytes", 80000)
+        return (self.queue_bytes + packet_size) <= capacity_bytes
+
+    def enqueue(self, packet_size: int) -> bool:
+        """
+        Add a packet to the queue.
+
+        Args:
+            packet_size: Size of packet in bytes
+
+        Returns:
+            True if packet was enqueued, False if dropped
+        """
+        if not self.can_enqueue(packet_size):
+            self.metrics.dropped_packets += 1
+            return False
+
+        self.queue_depth += 1
+        self.queue_bytes += packet_size
+        self.metrics.max_queue_depth = max(
+            self.metrics.max_queue_depth, self.queue_depth
+        )
+        return True
+
+    def dequeue(self, packet_size: int) -> None:
+        """
+        Remove a packet from the queue.
+
+        Args:
+            packet_size: Size of packet being dequeued
+        """
+        self.queue_depth = max(0, self.queue_depth - 1)
+        self.queue_bytes = max(0, self.queue_bytes - packet_size)
+
     def decide_packet_size(
         self,
         rat_decision: RATDecision,
@@ -421,6 +631,13 @@ class QueueSimulator:
         # DTMC transition based on corrected PDR
         new_size = dtmc.transition(corrected_pdr, self.metrics.total_packets)
 
+        # Enforce PHY-layer max packet size
+        if self.enforce_phy_limits:
+            max_size = get_max_packet_size(rat)
+            if new_size > max_size:
+                new_size = max_size
+                self.metrics.capacity_limited_count += 1
+
         # Determine priority based on urgency
         priority = min(7, int(self.get_queue_context().urgency_level * 7))
 
@@ -450,6 +667,7 @@ class QueueSimulator:
             dtmc.reset()
         self.current_rat = None
         self.queue_depth = 0
+        self.queue_bytes = 0
         self.recent_pdrs = []
         self.metrics = SimulationMetrics()
 
@@ -477,6 +695,7 @@ class IntegratedQueueSimulator:
         base_packet_size: int = 1000,
         correction_exponent: float = 0.8,
         seed: Optional[int] = None,
+        enforce_phy_limits: bool = True,
     ):
         """
         Initialize integrated simulator.
@@ -488,12 +707,14 @@ class IntegratedQueueSimulator:
             base_packet_size: Base packet size for PDR correction
             correction_exponent: PDR correction exponent
             seed: Random seed for reproducibility
+            enforce_phy_limits: Whether to enforce PHY-layer constraints
         """
         self.rat_api = rat_api
         self.network_data = network_data
         self.arrival_rate_hz = arrival_rate_hz
         self.base_packet_size = base_packet_size
         self.correction_exponent = correction_exponent
+        self.enforce_phy_limits = enforce_phy_limits
 
         if seed is not None:
             random.seed(seed)
@@ -503,6 +724,7 @@ class IntegratedQueueSimulator:
         self.queue_sim = QueueSimulator(
             base_packet_size=base_packet_size,
             correction_exponent=correction_exponent,
+            enforce_phy_limits=enforce_phy_limits,
         )
 
         # SimPy environment (created on run)
@@ -593,9 +815,9 @@ class IntegratedQueueSimulator:
         rat: RATType,
         packet_size: int,
         predicted_pdr: float,
-    ) -> Tuple[bool, float]:
+    ) -> Tuple[bool, float, float]:
         """
-        Simulate transmission outcome.
+        Simulate transmission outcome with PHY-layer modeling.
 
         Args:
             rat: Selected RAT
@@ -603,7 +825,7 @@ class IntegratedQueueSimulator:
             predicted_pdr: PDR prediction (at base packet size)
 
         Returns:
-            (success, latency_ms)
+            (success, latency_ms, tx_time_ms)
         """
         # Apply packet size correction
         corrected_pdr = correct_pdr_for_packet_size(
@@ -616,39 +838,70 @@ class IntegratedQueueSimulator:
         # Simulate success/failure
         success = random.random() < corrected_pdr
 
-        # Simulate latency (simplified model)
-        base_latency = {
-            RATType.DSRC: 5.0,
-            RATType.PC5: 8.0,
-            RATType.FiveG: 15.0,
-        }.get(rat, 10.0)
+        # Calculate TX time using PHY model
+        tx_time_ms = calculate_tx_time_ms(packet_size, rat)
 
-        # Add variability and size-dependent component
+        # Get base latency from PHY config
+        base_latency = get_base_latency_ms(rat)
+
+        # Add variability (jitter) - more for contention-based access (DSRC)
+        if rat == RATType.DSRC:
+            jitter_factor = 0.5 + random.random()  # Higher variance
+        else:
+            jitter_factor = 0.8 + 0.4 * random.random()  # Lower variance
+
+        # Size-dependent component
         size_factor = packet_size / self.base_packet_size
-        latency = base_latency * (0.8 + 0.4 * random.random()) * (0.9 + 0.2 * size_factor)
 
-        return success, latency
+        # Total latency = base + tx_time + size adjustment + jitter
+        latency = (base_latency + tx_time_ms) * jitter_factor * (0.95 + 0.1 * size_factor)
+
+        return success, latency, tx_time_ms
 
     def _packet_generator(self, env: simpy.Environment, queue: simpy.Store):
-        """SimPy process: Generate packets at specified rate."""
+        """SimPy process: Generate packets at specified rate with bounded queue."""
         interval = 1.0 / self.arrival_rate_hz
+        packet_id = 0
 
         while not self._stop_simulation:
             yield env.timeout(interval)
             if self._stop_simulation:
                 break
-            packet = {"arrival_time": env.now, "id": self.queue_sim.metrics.total_packets}
+
+            # Estimate packet size for queue capacity check
+            estimated_size = self.base_packet_size
+
+            # Check if packet can be enqueued (bounded queue)
+            if self.enforce_phy_limits and not self.queue_sim.can_enqueue(estimated_size):
+                self.queue_sim.metrics.dropped_packets += 1
+                packet_id += 1
+                continue
+
+            packet = {
+                "arrival_time": env.now,
+                "id": packet_id,
+                "estimated_size": estimated_size,
+            }
             yield queue.put(packet)
             self.queue_sim.queue_depth += 1
+            self.queue_sim.queue_bytes += estimated_size
+            self.queue_sim.metrics.max_queue_depth = max(
+                self.queue_sim.metrics.max_queue_depth,
+                self.queue_sim.queue_depth,
+            )
+            packet_id += 1
 
     def _packet_processor(self, env: simpy.Environment, queue: simpy.Store):
-        """SimPy process: Process packets from queue."""
+        """SimPy process: Process packets from queue with PHY-layer modeling."""
         previous_rat = None
+        tx_times: List[float] = []
 
         while True:
             # Wait for packet
             packet = yield queue.get()
-            self.queue_sim.queue_depth -= 1
+            estimated_size = packet.get("estimated_size", self.base_packet_size)
+            self.queue_sim.queue_depth = max(0, self.queue_sim.queue_depth - 1)
+            self.queue_sim.queue_bytes = max(0, self.queue_sim.queue_bytes - estimated_size)
 
             # Get network state
             state = self._get_network_state(env.now)
@@ -670,12 +923,13 @@ class IntegratedQueueSimulator:
             packet_decision = self.queue_sim.decide_packet_size(rat_decision, state)
             packet_size = packet_decision.packet_size_bytes
 
-            # Simulate transmission
-            success, latency = self._simulate_transmission(
+            # Simulate transmission with PHY-layer model
+            success, latency, tx_time = self._simulate_transmission(
                 selected_rat,
                 packet_size,
                 rat_decision.predicted_pdr,
             )
+            tx_times.append(tx_time)
 
             # Create outcome and update PDR estimate
             outcome = TransmissionOutcome(
@@ -739,6 +993,7 @@ class IntegratedQueueSimulator:
                 "corrected_pdr": corrected_pdr,
                 "success": success,
                 "latency_ms": latency,
+                "tx_time_ms": tx_time,
                 "queue_depth": self.queue_sim.queue_depth,
                 "dtmc_state": dtmc_state,
                 "latitude": state.latitude,
@@ -747,6 +1002,10 @@ class IntegratedQueueSimulator:
 
             # Simulate transmission delay
             yield env.timeout(latency / 1000.0)
+
+        # Update mean TX time
+        if tx_times:
+            self.queue_sim.metrics.mean_tx_time_ms = float(np.mean(tx_times))
 
     def run(
         self,
@@ -838,6 +1097,7 @@ def run_standalone(
     base_packet_size: int = 1000,
     correction_exponent: float = 0.8,
     seed: Optional[int] = None,
+    enforce_phy_limits: bool = True,
 ):
     """
     Run simulation using pre-computed RAT decisions from CSV.
@@ -852,11 +1112,12 @@ def run_standalone(
         base_packet_size: Base packet size for PDR correction
         correction_exponent: PDR correction exponent
         seed: Random seed
+        enforce_phy_limits: Whether to enforce PHY-layer constraints
     """
     print(f"Loading RAT decisions from {input_csv}")
     data = pd.read_csv(input_csv)
 
-    print(f"Running simulation with {len(data)} packets")
+    print(f"Running simulation with {len(data)} packets (PHY limits: {enforce_phy_limits})")
     simulator = IntegratedQueueSimulator(
         rat_api=None,  # Use pre-computed decisions
         network_data=data,
@@ -864,6 +1125,7 @@ def run_standalone(
         base_packet_size=base_packet_size,
         correction_exponent=correction_exponent,
         seed=seed,
+        enforce_phy_limits=enforce_phy_limits,
     )
 
     metrics = simulator.run(max_packets=len(data))
@@ -875,17 +1137,21 @@ def run_standalone(
     print(f"Total packets:     {metrics.total_packets}")
     print(f"Successful:        {metrics.successful_packets}")
     print(f"Failed:            {metrics.failed_packets}")
+    print(f"Dropped:           {metrics.dropped_packets}")
     print(f"PDR:               {metrics.pdr:.4f}")
     print(f"Throughput:        {metrics.throughput_bps:.2f} Bps")
     print(f"Mean latency:      {metrics.mean_latency_ms:.2f} ms")
     print(f"Max latency:       {metrics.max_latency_ms:.2f} ms")
+    print(f"Mean TX time:      {metrics.mean_tx_time_ms:.2f} ms")
     print(f"RAT switches:      {metrics.rat_switches}")
     print(f"Mean packet size:  {metrics.mean_packet_size:.0f} bytes")
+    print(f"Max queue depth:   {metrics.max_queue_depth}")
+    print(f"Capacity limited:  {metrics.capacity_limited_count}")
     print(f"DTMC increases:    {metrics.dtmc_increases}")
     print(f"DTMC decreases:    {metrics.dtmc_decreases}")
     print("\nRAT usage:")
     for rat, count in metrics.rat_usage.items():
-        pct = count / metrics.total_packets * 100
+        pct = count / metrics.total_packets * 100 if metrics.total_packets > 0 else 0
         print(f"  {rat.value}: {count} ({pct:.1f}%)")
     print("=" * 60)
 
@@ -933,6 +1199,10 @@ def main():
         "--seed", type=int, default=None,
         help="Random seed for reproducibility"
     )
+    parser.add_argument(
+        "--no-phy-limits", action="store_true",
+        help="Disable PHY-layer constraints (unbounded queue, no TX limits)"
+    )
 
     args = parser.parse_args()
 
@@ -945,6 +1215,7 @@ def main():
         base_packet_size=args.base_size,
         correction_exponent=args.correction_exp,
         seed=args.seed,
+        enforce_phy_limits=not args.no_phy_limits,
     )
 
 
