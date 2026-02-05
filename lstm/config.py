@@ -36,7 +36,7 @@ TRAIN_RATIO = 0.4
 # =============================================================================
 # Data Collection Parameters
 # =============================================================================
-TX_INTERVAL_MS = 20  # in ms, 50 packets per second
+TX_INTERVAL_MS = 100  # in ms, 10 packets per second
 PDR_WINDOW = 10  # in seconds
 
 # =============================================================================
@@ -50,63 +50,94 @@ LATENCY_TIE_MARGIN_MS = 1.0  # Latency difference to trigger tie-breaking
 # Packet Size Bounds (for queue simulator integration)
 # =============================================================================
 PACKET_SIZE_BOUNDS = {
-    "dsrc": {"min": 100, "max": 1500, "levels": 8},
-    "pc5": {"min": 100, "max": 2000, "levels": 8},
-    "5g": {"min": 100, "max": 1400, "levels": 8},
+    "dsrc": {"min": 1024, "max": 4096, "levels": 4},
+    "pc5": {"min": 1024, "max": 4096, "levels": 4},
+    "5g": {"min": 1024, "max": 4096, "levels": 4},
 }
 
 # DTMC (Discrete Time Markov Chain) Packet Sizing Parameters
-DTMC_THRESHOLD_HIGH = 0.95  # PDR above this may increase packet size
-DTMC_THRESHOLD_LOW = 0.85   # PDR below this may decrease packet size
-DTMC_P_UP = 0.7             # Probability of increasing when PDR high
-DTMC_P_DOWN = 0.8           # Probability of decreasing when PDR low
+# Packet sizes: 1024 -> 2048 -> 3072 -> 4096 bytes (increments of 1024)
+DTMC_PACKET_SIZES = [1024, 2048, 3072, 4096]  # Explicit size levels
+DTMC_THRESHOLD_HIGH = 0.99  # PDR above this -> increase packet size
+DTMC_THRESHOLD_LOW = 0.95   # PDR below this -> decrease packet size
+DTMC_WINDOW_SECONDS = 1.0   # Moving window for PDR averaging (seconds)
+DTMC_P_UP = 1.0             # Deterministic transitions (no randomness)
+DTMC_P_DOWN = 1.0           # Deterministic transitions (no randomness)
 
 # =============================================================================
 # PHY-Layer Configuration (3GPP/IEEE Standards)
 # =============================================================================
 # Resource Block-based capacity model for realistic simulation.
-# Uses fixed TX intervals (50 Hz = 20ms) with dynamic packet sizes.
+#
+# Subframe Data Capacity Formula:
+#   dSF = NSC × Nsym × NRB × Rmod × CR
+#
+# Where:
+#   NSC   = Subcarriers per RB (12 for LTE/NR)
+#   Nsym  = Symbols per subframe (14 for normal CP)
+#   NRB   = Resource blocks (total or per subchannel × num subchannels)
+#   Rmod  = Bits per symbol (modulation order: QPSK=2, 16QAM=4, 64QAM=6)
+#   CR    = Channel coding rate (0.5 - 0.9)
 
 RAT_PHY_CONFIG = {
     # 5G NR (FR1, 15 kHz SCS)
-    # 1 RB = 12 subcarriers × 14 OFDM symbols
+    # 1 RB = 12 subcarriers × 14 OFDM symbols per slot
     # 1 slot = 1ms (15 kHz SCS), 1 frame = 10ms = 10 slots
-    # 20 MHz → 106 RBs, 64QAM CR 0.66 → ~158 bits/RB
+    # 20 MHz → 106 RBs
     "5g": {
-        "bandwidth_mhz": 20,
-        "rbs_available": 106,
-        "bits_per_rb": 158,              # 64QAM, code rate 0.66
-        "slots_per_frame": 10,
-        "frame_duration_ms": 10,
-        "max_bytes_per_tx": 40000,       # ~40 KB per 20ms TX interval
-        "queue_capacity_bytes": 80000,   # 2 TX intervals buffer
+        # RB-based capacity formula components
+        "n_subcarriers": 12,             # NSC: fixed by NR spec
+        "n_symbols": 14,                 # Nsym: symbols per slot (normal CP)
+        "n_rbs": 106,                    # NRB: 20 MHz bandwidth
+        "modulation_order": 6,           # Rmod: 64QAM (typical for good channel)
+        "coding_rate": 0.66,             # CR: typical for 64QAM MCS
+        # Timing
+        "slot_duration_ms": 1,           # 1 slot = 1ms for 15 kHz SCS
         "base_latency_ms": 15.0,         # Typical E2E latency
+        # Queue (2 TX intervals buffer)
+        "queue_multiplier": 2,
     },
     # C-V2X PC5 Mode 4 (LTE Sidelink)
-    # 1 RB = 12 subcarriers × 7 symbols
-    # 1 subframe = 1ms (2 slots), 10 MHz → 50 RBs
-    # QPSK typical for V2X → ~24 bits/RB
+    # 1 RB = 12 subcarriers × 14 symbols per subframe (2 slots × 7 symbols)
+    # 1 subframe = 1ms, 10 MHz → 50 RBs available
+    # Subchannel-based allocation for sidelink
     "pc5": {
-        "bandwidth_mhz": 10,
-        "rbs_available": 50,
-        "bits_per_rb": 24,               # QPSK
-        "subframes_per_tx": 20,          # 20ms = 20 subframes
-        "max_bytes_per_tx": 6000,        # ~6 KB per 20ms TX interval
-        "queue_capacity_bytes": 12000,   # 2 TX intervals buffer
+        # RB-based capacity formula components
+        "n_subcarriers": 12,             # NSC: fixed by LTE spec
+        "n_symbols": 14,                 # Nsym: symbols per subframe (2 slots × 7)
+        "n_rbs_per_subchannel": 10,      # RBs per subchannel (configurable)
+        "n_subchannels": 1,              # Configurable: 1-2 subchannels typical
+        "modulation_order": 2,           # Rmod: QPSK (default, conservative for V2X)
+        "coding_rate": 0.5,              # CR: 0.5 (high reliability mode)
+        # Timing
+        "subframe_duration_ms": 1,       # 1 subframe = 1ms
         "base_latency_ms": 8.0,          # Typical E2E latency
+        # Queue (2 TX intervals buffer)
+        "queue_multiplier": 2,
     },
     # DSRC 802.11p
-    # 10 MHz OFDM channel, 6 Mbps (QPSK 1/2 coding) - conservative
+    # 10 MHz OFDM channel - uses data rate model (not RB-based)
+    # QPSK 1/2 coding gives ~6 Mbps (conservative)
     "dsrc": {
-        "bandwidth_mhz": 10,
+        # Data rate model (802.11p uses OFDM, not RB allocation)
         "data_rate_mbps": 6,             # Conservative QPSK 1/2
-        "max_bytes_per_tx": 15000,       # ~15 KB per 20ms TX interval
-        "queue_capacity_bytes": 30000,   # 2 TX intervals buffer
+        "modulation_order": 2,           # QPSK
+        "coding_rate": 0.5,              # 1/2 rate
+        # Timing
         "base_latency_ms": 5.0,          # Typical E2E latency (contention-based)
+        # Contention parameters
         "contention_window_min": 15,     # 802.11p CWmin
         "contention_window_max": 1023,   # 802.11p CWmax
+        # Queue (2 TX intervals buffer)
+        "queue_multiplier": 2,
     },
 }
+
+# MCS/CQI Reference Table (for adaptive modulation - future use)
+# CQI | Modulation | Rmod | Typical CR | Use Case
+# 1-6 | QPSK       | 2    | 0.08-0.6   | Low SNR, high reliability
+# 7-9 | 16QAM      | 4    | 0.37-0.6   | Medium SNR
+# 10-15| 64QAM     | 6    | 0.46-0.93  | High SNR, max throughput
 
 # =============================================================================
 # Feature Columns by RAT Type

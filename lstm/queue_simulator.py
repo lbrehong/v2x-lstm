@@ -42,9 +42,9 @@ from api_types import (
 )
 from config import (
     OUTPUT_DIR,
-    PACKET_SIZE_BOUNDS,
+    DTMC_PACKET_SIZES,
     DTMC_THRESHOLD_HIGH, DTMC_THRESHOLD_LOW,
-    DTMC_P_UP, DTMC_P_DOWN,
+    DTMC_WINDOW_SECONDS,
     RAT_PHY_CONFIG,
     TX_INTERVAL_MS,
 )
@@ -69,6 +69,88 @@ def get_phy_config(rat: RATType) -> Dict:
     return RAT_PHY_CONFIG.get(rat.value, RAT_PHY_CONFIG.get("5g", {}))
 
 
+def calculate_subframe_capacity_bits(rat: RATType) -> int:
+    """
+    Calculate data bits per subframe/slot using RB formula.
+
+    Formula: dSF = NSC × Nsym × NRB × Rmod × CR
+
+    Where:
+        NSC   = Subcarriers per RB (12)
+        Nsym  = Symbols per subframe/slot (14)
+        NRB   = Resource blocks
+        Rmod  = Bits per symbol (QPSK=2, 16QAM=4, 64QAM=6)
+        CR    = Coding rate
+
+    For PC5: NRB = n_rbs_per_subchannel × n_subchannels
+    For DSRC: Uses data rate model (bits per ms)
+
+    Args:
+        rat: The RAT type
+
+    Returns:
+        Data bits per subframe/slot (or per ms for DSRC)
+    """
+    config = get_phy_config(rat)
+
+    if rat.value == "dsrc":
+        # DSRC: use data rate model (bits per ms)
+        data_rate_mbps = config.get("data_rate_mbps", 6)
+        return int(data_rate_mbps * 1e6 / 1000)  # bits per ms
+
+    # RB-based calculation for PC5 and 5G
+    n_sc = config.get("n_subcarriers", 12)
+    n_sym = config.get("n_symbols", 14)
+    r_mod = config.get("modulation_order", 2)
+    cr = config.get("coding_rate", 0.5)
+
+    # Determine number of RBs
+    if rat.value == "pc5":
+        # PC5: subchannel-based allocation
+        n_rbs_per_subchannel = config.get("n_rbs_per_subchannel", 10)
+        n_subchannels = config.get("n_subchannels", 1)
+        n_rb = n_rbs_per_subchannel * n_subchannels
+    else:
+        # 5G NR: direct RB count
+        n_rb = config.get("n_rbs", 106)
+
+    # dSF = NSC × Nsym × NRB × Rmod × CR
+    return int(n_sc * n_sym * n_rb * r_mod * cr)
+
+
+def calculate_tx_capacity_bytes(rat: RATType, tx_interval_ms: int) -> int:
+    """
+    Calculate maximum bytes transmittable in one TX interval.
+
+    Args:
+        rat: The RAT type
+        tx_interval_ms: TX interval in milliseconds
+
+    Returns:
+        Maximum bytes per TX interval
+    """
+    bits_per_ms = calculate_subframe_capacity_bits(rat)
+    total_bits = bits_per_ms * tx_interval_ms
+    return total_bits // 8
+
+
+def calculate_queue_capacity_bytes(rat: RATType, tx_interval_ms: int) -> int:
+    """
+    Calculate queue capacity in bytes based on TX capacity and multiplier.
+
+    Args:
+        rat: The RAT type
+        tx_interval_ms: TX interval in milliseconds
+
+    Returns:
+        Queue capacity in bytes
+    """
+    config = get_phy_config(rat)
+    queue_multiplier = config.get("queue_multiplier", 2)
+    tx_capacity = calculate_tx_capacity_bytes(rat, tx_interval_ms)
+    return tx_capacity * queue_multiplier
+
+
 def can_transmit(packet_size: int, rat: RATType) -> bool:
     """
     Check if packet fits within one TX interval capacity.
@@ -80,8 +162,7 @@ def can_transmit(packet_size: int, rat: RATType) -> bool:
     Returns:
         True if packet can be transmitted in one TX interval
     """
-    config = get_phy_config(rat)
-    max_bytes = config.get("max_bytes_per_tx", 40000)
+    max_bytes = calculate_tx_capacity_bytes(rat, TX_INTERVAL_MS)
     return packet_size <= max_bytes
 
 
@@ -98,14 +179,13 @@ def get_queue_capacity_packets(rat: RATType, packet_size: int) -> int:
     """
     if packet_size <= 0:
         return 100  # Default capacity
-    config = get_phy_config(rat)
-    capacity_bytes = config.get("queue_capacity_bytes", 80000)
+    capacity_bytes = calculate_queue_capacity_bytes(rat, TX_INTERVAL_MS)
     return max(1, capacity_bytes // packet_size)
 
 
 def get_max_packet_size(rat: RATType) -> int:
     """
-    Get maximum allowed packet size for a RAT.
+    Get maximum allowed packet size for a RAT based on TX capacity.
 
     Args:
         rat: Selected RAT type
@@ -113,15 +193,14 @@ def get_max_packet_size(rat: RATType) -> int:
     Returns:
         Maximum packet size in bytes
     """
-    config = get_phy_config(rat)
-    return config.get("max_bytes_per_tx", 40000)
+    return calculate_tx_capacity_bytes(rat, TX_INTERVAL_MS)
 
 
 def calculate_tx_time_ms(packet_size: int, rat: RATType) -> float:
     """
     Calculate transmission time based on PHY characteristics.
 
-    For scheduled access (5G): TX time is based on resource allocation
+    For scheduled access (5G/PC5): TX time based on bits/ms capacity
     For contention-based (DSRC): TX time includes contention delay
 
     Args:
@@ -132,32 +211,21 @@ def calculate_tx_time_ms(packet_size: int, rat: RATType) -> float:
         Transmission time in milliseconds
     """
     config = get_phy_config(rat)
+    bits_per_ms = calculate_subframe_capacity_bits(rat)
+
+    if bits_per_ms <= 0:
+        return 1.0  # Default fallback
+
+    # Calculate base TX time from capacity
+    packet_bits = packet_size * 8
+    tx_time_ms = packet_bits / bits_per_ms
 
     if rat.value == "dsrc":
-        # DSRC: contention-based, use data rate
-        data_rate_bps = config.get("data_rate_mbps", 6) * 1e6
-        tx_time_ms = (packet_size * 8 / data_rate_bps) * 1000
-        # Add average contention delay (simplified model)
+        # DSRC: add average contention delay (simplified model)
         avg_backoff_ms = config.get("contention_window_min", 15) * 0.009 / 2
         return tx_time_ms + avg_backoff_ms
 
-    elif rat.value == "pc5":
-        # PC5: semi-persistent scheduling, resource allocation
-        # Time based on subframe allocation
-        max_bytes = config.get("max_bytes_per_tx", 6000)
-        subframes = config.get("subframes_per_tx", 20)
-        # Proportion of TX interval used
-        proportion = min(1.0, packet_size / max_bytes)
-        return subframes * proportion
-
-    else:  # 5G
-        # 5G NR: scheduled, fast resource allocation
-        max_bytes = config.get("max_bytes_per_tx", 40000)
-        frame_duration = config.get("frame_duration_ms", 10)
-        slots = config.get("slots_per_frame", 10)
-        # Typically 1-2 slots needed
-        proportion = min(1.0, packet_size / max_bytes)
-        return frame_duration * proportion / slots * 2  # ~2 slots typical
+    return tx_time_ms
 
 
 def get_base_latency_ms(rat: RATType) -> float:
@@ -182,56 +250,52 @@ class DTMCPacketSizer:
     """
     Discrete Time Markov Chain for adaptive packet sizing.
 
-    State transitions based on observed/predicted PDR:
-    - PDR >= threshold_high: May increase packet size (p_up probability)
-    - PDR <= threshold_low: May decrease packet size (p_down probability)
-    - Otherwise: Stay at current size
+    Packet sizes: 1024 -> 2048 -> 3072 -> 4096 bytes (increments of 1024)
+
+    State transitions based on moving window average PDR:
+    - PDR > 0.99: Increase packet size (more data per transmission)
+    - PDR < 0.95: Decrease packet size (improve reliability)
+    - Otherwise: Maintain current size
 
     State Diagram:
-        [s_min] <--low_pdr-- [s_1] <--low_pdr-- [s_2] ... [s_max]
-           |                   |                   |          |
-           +----high_pdr----->-+----high_pdr----->-+   ...   -+
+        [1024] <--PDR<0.95-- [2048] <--PDR<0.95-- [3072] <--PDR<0.95-- [4096]
+           |                    |                    |                    |
+           +----PDR>0.99------>-+----PDR>0.99------>-+----PDR>0.99------>-+
     """
 
     def __init__(
         self,
         rat: RATType,
-        num_levels: int = 8,
         threshold_high: float = DTMC_THRESHOLD_HIGH,
         threshold_low: float = DTMC_THRESHOLD_LOW,
-        p_up: float = DTMC_P_UP,
-        p_down: float = DTMC_P_DOWN,
+        window_seconds: float = DTMC_WINDOW_SECONDS,
+        tx_rate_hz: float = 1000 / TX_INTERVAL_MS,
     ):
         """
         Initialize DTMC packet sizer.
 
         Args:
-            rat: RAT type (determines packet size bounds)
-            num_levels: Number of discrete packet size states
-            threshold_high: PDR above this may increase size
-            threshold_low: PDR below this may decrease size
-            p_up: Probability of increasing when PDR high
-            p_down: Probability of decreasing when PDR low
+            rat: RAT type
+            threshold_high: PDR above this -> increase size (default 0.99)
+            threshold_low: PDR below this -> decrease size (default 0.95)
+            window_seconds: Moving window for PDR averaging (default 1.0s)
+            tx_rate_hz: Transmission rate for window size calculation
         """
         self.rat = rat
         self.threshold_high = threshold_high
         self.threshold_low = threshold_low
-        self.p_up = p_up
-        self.p_down = p_down
 
-        # Get bounds for this RAT
-        bounds = PACKET_SIZE_BOUNDS.get(rat.value, {"min": 100, "max": 1400})
-        self.min_size = bounds["min"]
-        self.max_size = bounds["max"]
-        self.num_levels = num_levels
+        # Fixed packet size levels: 1024, 2048, 3072, 4096
+        self.size_levels = np.array(DTMC_PACKET_SIZES, dtype=int)
+        self.num_levels = len(self.size_levels)
 
-        # Create discrete size levels
-        self.size_levels = np.linspace(
-            self.min_size, self.max_size, num_levels, dtype=int
-        )
+        # Current state (start at minimum size for safety)
+        self.current_state = 0
 
-        # Current state (start at middle)
-        self.current_state = num_levels // 2
+        # Moving window for PDR: store (timestamp, success) tuples
+        self.window_seconds = window_seconds
+        self.window_size = int(window_seconds * tx_rate_hz)  # ~50 samples for 1s at 50Hz
+        self.pdr_history: List[Tuple[float, bool]] = []  # (timestamp, delivered)
 
         # History for analysis
         self.history: List[Tuple[int, int, float, str]] = []  # (step, state, pdr, action)
@@ -241,38 +305,89 @@ class DTMCPacketSizer:
         """Get current packet size in bytes."""
         return int(self.size_levels[self.current_state])
 
+    @property
+    def min_size(self) -> int:
+        """Minimum packet size."""
+        return int(self.size_levels[0])
+
+    @property
+    def max_size(self) -> int:
+        """Maximum packet size."""
+        return int(self.size_levels[-1])
+
+    def record_outcome(self, timestamp: float, delivered: bool) -> None:
+        """
+        Record a transmission outcome for PDR calculation.
+
+        Args:
+            timestamp: Simulation timestamp
+            delivered: Whether packet was successfully delivered
+        """
+        self.pdr_history.append((timestamp, delivered))
+
+        # Trim old entries outside window
+        if len(self.pdr_history) > self.window_size * 2:
+            cutoff_time = timestamp - self.window_seconds
+            self.pdr_history = [
+                (t, d) for t, d in self.pdr_history if t >= cutoff_time
+            ]
+
+    def get_window_pdr(self, current_time: float) -> Optional[float]:
+        """
+        Calculate PDR over the moving window.
+
+        Args:
+            current_time: Current simulation timestamp
+
+        Returns:
+            Average PDR over window, or None if insufficient data
+        """
+        if not self.pdr_history:
+            return None
+
+        cutoff_time = current_time - self.window_seconds
+        window_outcomes = [d for t, d in self.pdr_history if t >= cutoff_time]
+
+        if len(window_outcomes) < 5:  # Minimum samples for reliable estimate
+            return None
+
+        return sum(window_outcomes) / len(window_outcomes)
+
     def transition(self, pdr: float, step: int = 0) -> int:
         """
         Perform DTMC transition based on PDR.
 
+        Transitions are deterministic:
+        - PDR > 0.99 and not at max -> increase
+        - PDR < 0.95 and not at min -> decrease
+        - Otherwise -> stay
+
         Args:
-            pdr: Observed or predicted PDR
+            pdr: Moving window average PDR (or predicted if no history)
             step: Simulation step for logging
 
         Returns:
             New packet size in bytes
         """
-        old_state = self.current_state
         action = "stay"
 
-        if pdr >= self.threshold_high and self.current_state < self.num_levels - 1:
-            # May increase
-            if random.random() < self.p_up:
-                self.current_state += 1
-                action = "increase"
+        if pdr > self.threshold_high and self.current_state < self.num_levels - 1:
+            # PDR excellent -> increase packet size
+            self.current_state += 1
+            action = "increase"
 
-        elif pdr <= self.threshold_low and self.current_state > 0:
-            # May decrease
-            if random.random() < self.p_down:
-                self.current_state -= 1
-                action = "decrease"
+        elif pdr < self.threshold_low and self.current_state > 0:
+            # PDR degraded -> decrease packet size
+            self.current_state -= 1
+            action = "decrease"
 
         self.history.append((step, self.current_state, pdr, action))
         return self.current_size
 
     def reset(self):
         """Reset to initial state."""
-        self.current_state = self.num_levels // 2
+        self.current_state = 0  # Start at minimum size
+        self.pdr_history = []
         self.history = []
 
     def get_statistics(self) -> Dict:
@@ -556,8 +671,7 @@ class QueueSimulator:
             return True
 
         target_rat = rat or self.current_rat or RATType.FiveG
-        config = get_phy_config(target_rat)
-        capacity_bytes = config.get("queue_capacity_bytes", 80000)
+        capacity_bytes = calculate_queue_capacity_bytes(target_rat, TX_INTERVAL_MS)
         return (self.queue_bytes + packet_size) <= capacity_bytes
 
     def enqueue(self, packet_size: int) -> bool:
@@ -594,10 +708,13 @@ class QueueSimulator:
     def decide_packet_size(
         self,
         rat_decision: RATDecision,
-        current_state: NetworkState
+        current_time: float = 0.0
     ) -> PacketSizeDecision:
         """
-        Size packets based on RAT selection and predictions.
+        Size packets based on RAT selection and moving window PDR.
+
+        DTMC uses actual PDR from past transmissions (moving window),
+        falling back to predicted PDR if insufficient history.
 
         Implements QueueSimulatorAPI.decide_packet_size()
         """
@@ -608,7 +725,7 @@ class QueueSimulator:
                 packet_size_bytes=self.base_packet_size,
                 fragment_count=1,
                 priority_level=0,
-                send_rate_hz=50.0,
+                send_rate_hz=1000 / TX_INTERVAL_MS,
             )
 
         # Get DTMC for this RAT
@@ -618,18 +735,24 @@ class QueueSimulator:
                 packet_size_bytes=self.base_packet_size,
                 fragment_count=1,
                 priority_level=0,
-                send_rate_hz=50.0,
+                send_rate_hz=1000 / TX_INTERVAL_MS,
             )
 
-        # Use predicted PDR to inform DTMC (with correction for current size)
-        predicted_pdr = rat_decision.predicted_pdr
-        current_size = dtmc.current_size
-        corrected_pdr = correct_pdr_for_packet_size(
-            predicted_pdr, self.base_packet_size, current_size, self.correction_exponent
-        )
+        # Get PDR from moving window (actual outcomes), fallback to prediction
+        window_pdr = dtmc.get_window_pdr(current_time)
+        if window_pdr is not None:
+            # Use actual PDR from recent transmissions
+            pdr_for_decision = window_pdr
+        else:
+            # Not enough history - use predicted PDR with size correction
+            predicted_pdr = rat_decision.predicted_pdr
+            current_size = dtmc.current_size
+            pdr_for_decision = correct_pdr_for_packet_size(
+                predicted_pdr, self.base_packet_size, current_size, self.correction_exponent
+            )
 
-        # DTMC transition based on corrected PDR
-        new_size = dtmc.transition(corrected_pdr, self.metrics.total_packets)
+        # DTMC transition based on PDR
+        new_size = dtmc.transition(pdr_for_decision, self.metrics.total_packets)
 
         # Enforce PHY-layer max packet size
         if self.enforce_phy_limits:
@@ -645,12 +768,14 @@ class QueueSimulator:
             packet_size_bytes=new_size,
             fragment_count=1,
             priority_level=priority,
-            send_rate_hz=50.0,
+            send_rate_hz=1000 / TX_INTERVAL_MS,
         )
 
     def update_pdr_estimate(self, outcome: TransmissionOutcome) -> None:
         """
         Update internal PDR estimates from outcome.
+
+        Records the outcome to the DTMC's moving window for the RAT used.
 
         Implements QueueSimulatorAPI.update_pdr_estimate()
         """
@@ -660,6 +785,12 @@ class QueueSimulator:
         # Keep window limited
         if len(self.recent_pdrs) > self.pdr_window * 2:
             self.recent_pdrs = self.recent_pdrs[-self.pdr_window:]
+
+        # Record to DTMC for the RAT used
+        dtmc = self.dtmc_sizers.get(outcome.rat_used)
+        if dtmc:
+            timestamp_sec = outcome.timestamp_ms / 1000.0
+            dtmc.record_outcome(timestamp_sec, outcome.delivered)
 
     def reset(self):
         """Reset simulator state."""
@@ -691,7 +822,7 @@ class IntegratedQueueSimulator:
         self,
         rat_api=None,
         network_data: Optional[pd.DataFrame] = None,
-        arrival_rate_hz: float = 50.0,
+        arrival_rate_hz: float = 1000 / TX_INTERVAL_MS,
         base_packet_size: int = 1000,
         correction_exponent: float = 0.8,
         seed: Optional[int] = None,
@@ -919,8 +1050,8 @@ class IntegratedQueueSimulator:
                 self.queue_sim.metrics.rat_switches += 1
             previous_rat = selected_rat
 
-            # Get packet size decision
-            packet_decision = self.queue_sim.decide_packet_size(rat_decision, state)
+            # Get packet size decision (uses moving window PDR from actual outcomes)
+            packet_decision = self.queue_sim.decide_packet_size(rat_decision, env.now)
             packet_size = packet_decision.packet_size_bytes
 
             # Simulate transmission with PHY-layer model
@@ -1093,7 +1224,7 @@ class IntegratedQueueSimulator:
 def run_standalone(
     input_csv: str,
     output_csv: str,
-    arrival_rate_hz: float = 50.0,
+    arrival_rate_hz: float = 1000 / TX_INTERVAL_MS,
     base_packet_size: int = 1000,
     correction_exponent: float = 0.8,
     seed: Optional[int] = None,
@@ -1184,17 +1315,17 @@ def main():
         help="Output CSV for simulation results"
     )
     parser.add_argument(
-        "--arrival-rate", type=float, default=50.0,
-        help="Packet arrival rate in Hz (default: 50)"
+        "--arrival-rate", type=float, default=10.0,
+        help="Packet arrival rate in Hz (default: 10)"
     )
     parser.add_argument(
-        "--base-size", type=int, default=1000,
-        help="Base packet size for PDR correction (default: 1000)"
+        "--base-size", type=int, default=1024,
+        help="Base packet size for PDR correction (default: 1024)"
     )
     parser.add_argument(
         "--correction-exp", type=float, default=0.8,
         help="PDR correction exponent (default: 0.8)"
-    )
+)
     parser.add_argument(
         "--seed", type=int, default=None,
         help="Random seed for reproducibility"
