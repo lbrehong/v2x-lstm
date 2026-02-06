@@ -71,40 +71,42 @@ def get_phy_config(rat: RATType) -> Dict:
 
 def calculate_subframe_capacity_bits(rat: RATType) -> int:
     """
-    Calculate data bits per subframe/slot using RB formula.
+    Calculate data bits per subframe/slot using unified OFDM formula.
 
-    Formula: dSF = NSC × Nsym × NRB × Rmod × CR
+    All RATs use: capacity = total_data_subcarriers × Nsym × Rmod × CR
 
-    Where:
+    For 5G/PC5 (RB-based):  total_data_subcarriers = NSC × NRB
         NSC   = Subcarriers per RB (12)
-        Nsym  = Symbols per subframe/slot (14)
-        NRB   = Resource blocks
+        NRB   = Resource blocks (direct count or subchannel × n_subchannels)
+    For DSRC (802.11p):      total_data_subcarriers = n_data_subcarriers (52)
+
+    Common parameters:
+        Nsym  = Symbols per subframe/slot/ms
         Rmod  = Bits per symbol (QPSK=2, 16QAM=4, 64QAM=6)
         CR    = Coding rate
-
-    For PC5: NRB = n_rbs_per_subchannel × n_subchannels
-    For DSRC: Uses data rate model (bits per ms)
 
     Args:
         rat: The RAT type
 
     Returns:
-        Data bits per subframe/slot (or per ms for DSRC)
+        Data bits per subframe/slot/ms
     """
     config = get_phy_config(rat)
 
-    if rat.value == "dsrc":
-        # DSRC: use data rate model (bits per ms)
-        data_rate_mbps = config.get("data_rate_mbps", 6)
-        return int(data_rate_mbps * 1e6 / 1000)  # bits per ms
-
-    # RB-based calculation for PC5 and 5G
-    n_sc = config.get("n_subcarriers", 12)
-    n_sym = config.get("n_symbols", 14)
     r_mod = config.get("modulation_order", 2)
     cr = config.get("coding_rate", 0.5)
+    n_sym = config.get("n_symbols", 14)
 
-    # Determine number of RBs
+    if rat.value == "dsrc":
+        # DSRC 802.11p: OFDM-level formula (no RB grouping)
+        # capacity = n_data_subcarriers × n_symbols × Rmod × CR
+        n_data_sc = config.get("n_data_subcarriers", 52)
+        return int(n_data_sc * n_sym * r_mod * cr)
+
+    # 5G / PC5: RB-based formula
+    # capacity = (NSC × NRB) × Nsym × Rmod × CR
+    n_sc = config.get("n_subcarriers", 12)
+
     if rat.value == "pc5":
         # PC5: subchannel-based allocation
         n_rbs_per_subchannel = config.get("n_rbs_per_subchannel", 10)
@@ -114,7 +116,6 @@ def calculate_subframe_capacity_bits(rat: RATType) -> int:
         # 5G NR: direct RB count
         n_rb = config.get("n_rbs", 106)
 
-    # dSF = NSC × Nsym × NRB × Rmod × CR
     return int(n_sc * n_sym * n_rb * r_mod * cr)
 
 

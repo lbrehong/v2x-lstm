@@ -67,15 +67,18 @@ DTMC_P_DOWN = 1.0           # Deterministic transitions (no randomness)
 # =============================================================================
 # PHY-Layer Configuration (3GPP/IEEE Standards)
 # =============================================================================
-# Resource Block-based capacity model for realistic simulation.
+# Unified OFDM capacity model for realistic simulation.
 #
-# Subframe Data Capacity Formula:
-#   dSF = NSC × Nsym × NRB × Rmod × CR
+# All RATs use: capacity = total_data_subcarriers × Nsym × Rmod × CR
 #
-# Where:
+# For 5G/PC5 (RB-based):   total_data_subcarriers = NSC × NRB
 #   NSC   = Subcarriers per RB (12 for LTE/NR)
 #   Nsym  = Symbols per subframe (14 for normal CP)
 #   NRB   = Resource blocks (total or per subchannel × num subchannels)
+# For DSRC (802.11p):       total_data_subcarriers = 52 (direct)
+#   Nsym  = 125 symbols/ms (8 μs OFDM symbol duration)
+#
+# Common:
 #   Rmod  = Bits per symbol (modulation order: QPSK=2, 16QAM=4, 64QAM=6)
 #   CR    = Channel coding rate (0.5 - 0.9)
 
@@ -116,13 +119,16 @@ RAT_PHY_CONFIG = {
         "queue_multiplier": 2,
     },
     # DSRC 802.11p
-    # 10 MHz OFDM channel - uses data rate model (not RB-based)
-    # QPSK 1/2 coding gives ~6 Mbps (conservative)
+    # 10 MHz OFDM channel, 64 subcarriers (52 data, 4 pilot, 4 null/guard)
+    # OFDM symbol = 8 μs (6.4 μs useful + 1.6 μs GI) → 125 symbols/ms
+    # Unified OFDM formula: capacity = n_data_subcarriers × n_symbols × Rmod × CR
+    # QPSK 1/2: 52 × 125 × 2 × 0.5 = 6500 bits/ms ≈ 6.5 Mbps
     "dsrc": {
-        # Data rate model (802.11p uses OFDM, not RB allocation)
-        "data_rate_mbps": 6,             # Conservative QPSK 1/2
-        "modulation_order": 2,           # QPSK
-        "coding_rate": 0.5,              # 1/2 rate
+        # OFDM-level capacity (analogous to RB formula for 5G/PC5)
+        "n_data_subcarriers": 52,        # 52 of 64 subcarriers carry data
+        "n_symbols": 125,                # symbols per ms (8 μs symbol duration)
+        "modulation_order": 2,           # Rmod: QPSK
+        "coding_rate": 0.5,              # CR: 1/2 rate
         # Timing
         "base_latency_ms": 5.0,          # Typical E2E latency (contention-based)
         # Contention parameters
