@@ -208,11 +208,11 @@ def opportunistic_best_rat(df):
     """
     best_rat_list = []
     previous_rat = "5g"
-    for index, row in df.iterrows():
+    for row in df.itertuples():
         options = [
-            ("dsrc", row["latency_ms_dsrc"], row["pdr_dsrc"]),
-            ("pc5", row["latency_ms_pc5"], row["pdr_pc5"]),
-            ("5g", row["latency_ms_5g"], row["pdr_5g"]),
+            ("dsrc", row.latency_ms_dsrc, row.pdr_dsrc),
+            ("pc5", row.latency_ms_pc5, row.pdr_pc5),
+            ("5g", row.latency_ms_5g, row.pdr_5g),
         ]
         # Filter by PDR threshold (>5%)
         valid_options = [opt for opt in options if opt[2] > 0.05]
@@ -374,8 +374,8 @@ def make_histogram_latency(input_csv, output_dir=OUTPUT_DIR):
     plt.legend(title="Selection Scheme")
     plt.grid(axis="y", linestyle="--", alpha=0.7)
 
-    plt.show()
     plt.savefig(os.path.join(output_dir, "latency_histogram.png"))
+    plt.show()
 
 
 def make_histogram_pdr(input_csv, output_dir=OUTPUT_DIR):
@@ -413,8 +413,8 @@ def make_histogram_pdr(input_csv, output_dir=OUTPUT_DIR):
     plt.legend(title="Model Type", fontsize=22, title_fontsize=24)
     plt.grid(axis="y", linestyle="--", alpha=0.7)
 
-    plt.show()
     plt.savefig(os.path.join(output_dir, "pdr_histogram.png"))
+    plt.show()
 
 
 def mean_ci(series, confidence=0.95):
@@ -499,10 +499,17 @@ def make_rmse_table(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR):
         scheme_data = []
         for rat in RATS:
             df = pd.read_csv(os.path.join(input_csv, f"final_log_{model_type}_{rat}.csv"))
-            latency_rmse, ci_latency = mean_ci(df["rmse_latency"])
-            pdr_rmse, ci_pdr = mean_ci(df["rmse_pdr"])
+            # MAE: mean of absolute errors
+            latency_mae, ci_latency_mae = mean_ci(df["mae_latency"])
+            pdr_mae, ci_pdr_mae = mean_ci(df["mae_pdr"])
+            # RMSE: sqrt of mean squared errors
+            latency_rmse = np.sqrt(df["squared_error_latency"].mean())
+            pdr_rmse = np.sqrt(df["squared_error_pdr"].mean())
 
-            scheme_data.append((f"{latency_rmse:.3f} ± {ci_latency:.3f}", f"{pdr_rmse:.3f} ± {ci_pdr:.3f}"))
+            scheme_data.append((
+                f"MAE: {latency_mae:.3f}±{ci_latency_mae:.3f} | RMSE: {latency_rmse:.3f}",
+                f"MAE: {pdr_mae:.3f}±{ci_pdr_mae:.3f} | RMSE: {pdr_rmse:.3f}",
+            ))
 
         rmse_summary[model_type] = scheme_data
 
@@ -526,30 +533,30 @@ def make_rmse_plot(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR):
         for rat in RATS:
             df = pd.read_csv(os.path.join(input_csv, f"final_log_{model_type}_{rat}.csv"))
 
-            latency_rmse_ma = df["rmse_latency"].rolling(window=window_size, min_periods=1).mean()
-            ax_lat.plot(latency_rmse_ma, label=f"Latency RMSE {rat.upper()}", linestyle="-", color=colors[rat])
+            latency_mae_ma = df["mae_latency"].rolling(window=window_size, min_periods=1).mean()
+            ax_lat.plot(latency_mae_ma, label=f"Latency MAE {rat.upper()}", linestyle="-", color=colors[rat])
 
-            pdr_rmse_ma = df["rmse_pdr"].rolling(window=window_size, min_periods=1).mean()
-            ax_pdr.plot(pdr_rmse_ma, label=f"PDR RMSE {rat.upper()}", linestyle="-", color=colors[rat])
+            pdr_mae_ma = df["mae_pdr"].rolling(window=window_size, min_periods=1).mean()
+            ax_pdr.plot(pdr_mae_ma, label=f"PDR MAE {rat.upper()}", linestyle="-", color=colors[rat])
 
         ax_lat.set_title(titles[i])
         ax_lat.set_xlabel("Message Index")
-        ax_lat.set_ylabel("Latency RMSE")
+        ax_lat.set_ylabel("Latency MAE")
         ax_lat.set_ylim(0, 15)
         ax_lat.grid(True, linestyle="--", alpha=0.5)
         ax_lat.legend()
 
         ax_pdr.set_title(titles[i])
         ax_pdr.set_xlabel("Message Index")
-        ax_pdr.set_ylabel("PDR RMSE")
+        ax_pdr.set_ylabel("PDR MAE")
         ax_pdr.set_ylim(0, 1)
         ax_pdr.grid(True, linestyle="--", alpha=0.5)
         ax_pdr.legend()
 
     plt.tight_layout()
-    plt.suptitle("Latency & PDR RMSE Moving Averages per Scheme", fontsize=14, y=1.05)
-    plt.show()
+    plt.suptitle("Latency & PDR MAE Moving Averages per Scheme", fontsize=14, y=1.05)
     plt.savefig(os.path.join(output_dir, "rmse_pred_plot.png"))
+    plt.show()
 
 
 if __name__ == "__main__":

@@ -115,12 +115,8 @@ class MetricsLogger(Callback):
             ])
 
 
-if __name__ == "__main__":
-    # Ensure output directories exist before any file operations
-    ensure_dir_exists(MODEL_DIR)
-    ensure_dir_exists(OUTPUT_DIR)
-
-    # Parse command-line arguments
+def parse_args():
+    """Parse command-line arguments for model training."""
     parser = argparse.ArgumentParser(description="LSTM/GRU/RNN Model Training and Prediction for RAT Selection")
     parser.add_argument('--npz', type=str, help="Path to preprocessed NPZ archive (skips CSV processing)")
     parser.add_argument('--data', type=str, help="Path to folder containing training CSV log files")
@@ -132,9 +128,124 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, help="Number of training epochs (default: 100)")
     parser.add_argument("--model", type=str, required=True, choices=['lstm', 'gru', 'rnn'],
                         help="RNN architecture type: lstm, gru, or rnn (SimpleRNN)")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # Extract arguments into local variables
+
+def load_csv_data(base_path, file_list, pdr_window, tx_interval):
+    """
+    Load CSV files, interpolate GPS gaps, and compute rolling PDR.
+
+    Args:
+        base_path: Directory containing the CSV files
+        file_list: List of filenames to process
+        pdr_window: Rolling window size in seconds for PDR computation
+        tx_interval: Expected transmission interval in milliseconds
+
+    Returns:
+        Concatenated DataFrame with PDR column added
+    """
+    dfs = []
+    for file in file_list:
+        print(f"Processing file: {file}")
+        df_part = pd.read_csv(os.path.join(base_path, file))
+        df_part["tx_latitude"] = df_part["tx_latitude"].interpolate().bfill()
+        df_part["tx_longitude"] = df_part["tx_longitude"].interpolate().bfill()
+        print("Computing rolling PDR...")
+        df_part = compute_pdr_rolling(df_part, "tx_timestamp_ms", pdr_window, tx_interval)
+        dfs.append(df_part)
+    return pd.concat(dfs, ignore_index=True)
+
+
+def prepare_data(df, df_new, rat, data_npz, output_dir):
+    """
+    Load from NPZ archive or preprocess from DataFrames.
+
+    Args:
+        df: Training DataFrame (can be None if loading from NPZ)
+        df_new: New data DataFrame for incremental learning (can be None)
+        rat: RAT type identifier
+        data_npz: Path to NPZ archive (None to preprocess from DataFrames)
+        output_dir: Directory to save cached NPZ data
+
+    Returns:
+        Tuple of (X_train, y_train, X_new_data, y_new_data).
+        X_new_data and y_new_data may be None if no new data provided.
+    """
+    if data_npz and os.path.exists(data_npz):
+        data = np.load(data_npz)
+        X_train = data["x_train"]
+        y_train = data["y_train"]
+        X_new_data = data["x_new_data"] if "x_new_data" in data else None
+        y_new_data = data["y_new_data"] if "y_new_data" in data else None
+        if X_new_data is not None:
+            print(f"Loaded preprocessed data: {X_train.shape[0]} training, {X_new_data.shape[0]} new samples")
+        else:
+            print(f"Loaded preprocessed data: {X_train.shape[0]} training samples (no new data)")
+    else:
+        print("Starting data preprocessing...")
+        print("Processing training set...")
+        (X_train, y_train, scalers) = preprocess_lstm_input(
+            df, new=True, rat=rat, target_cols=TARGET_COLS, seq_length=TIMESTEPS)
+
+        X_new_data, y_new_data = None, None
+        if df_new is not None:
+            print("Processing new data set...")
+            (X_new_data, y_new_data, scalers) = preprocess_lstm_input(
+                df_new, new=True, rat=rat, target_cols=TARGET_COLS, seq_length=TIMESTEPS)
+        print("Preprocessing complete.")
+
+        npz_path = os.path.join(output_dir, f"{rat}_lstm_data.npz")
+        save_data = dict(x_train=X_train, y_train=y_train)
+        if X_new_data is not None:
+            save_data["x_new_data"] = X_new_data
+            save_data["y_new_data"] = y_new_data
+        np.savez_compressed(npz_path, **save_data)
+        print(f"Preprocessed data saved to: {npz_path}")
+
+    return X_train, y_train, X_new_data, y_new_data
+
+
+def train_single_model(model_type, timesteps, features, X_train, y_train_dict, rat, epochs):
+    """
+    Build, train, and save a single model architecture.
+
+    Args:
+        model_type: RNN type ('lstm', 'gru', 'rnn')
+        timesteps: Input sequence length
+        features: Number of input features
+        X_train: Training input sequences
+        y_train_dict: Training targets as {'latency_ms': ..., 'pdr': ...}
+        rat: RAT type identifier
+        epochs: Maximum training epochs
+
+    Returns:
+        Tuple of (trained_model, training_history)
+    """
+    display_name = {"lstm": "LSTM", "gru": "GRU", "rnn": "SimpleRNN"}[model_type]
+    print("=" * 60)
+    print(f"Training {display_name} model...")
+
+    model = build_model(model_type, timesteps, features)
+    metrics_logger = MetricsLogger(model_type, rat)
+    early_stopping = EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
+    history = model.fit(X_train, y_train_dict, epochs=epochs, batch_size=BATCH_SIZE,
+                        callbacks=[metrics_logger, early_stopping],
+                        validation_split=VALIDATION_SPLIT, verbose=1)
+
+    save_path = os.path.join(MODEL_DIR, f"{model_type}_{rat}_{int(time.time())}.keras")
+    model.save(save_path)
+    print(f"{display_name} model saved to {save_path}")
+
+    return model, history
+
+
+def main():
+    """Main training pipeline."""
+    ensure_dir_exists(MODEL_DIR)
+    ensure_dir_exists(OUTPUT_DIR)
+
+    args = parse_args()
+
     PATH = args.data
     PATH_NEW = args.new_data
     RAT = args.rat
@@ -152,21 +263,27 @@ if __name__ == "__main__":
     FEATURES = FEATURES_COUNT[RAT]
 
     # Find trimmed CSV files matching the RAT type
+    files = []
     if PATH:
         files = find_files_with_string(PATH, f"trim_{RAT}")
-        new_file = find_files_with_string(PATH_NEW, f"trim_{RAT}")[0]
+    new_file = None
+    if PATH_NEW:
+        if not os.path.exists(PATH_NEW):
+            raise ValueError(f"New data path not found: {PATH_NEW}")
+        new_files = find_files_with_string(PATH_NEW, f"trim_{RAT}")
+        if not new_files:
+            raise ValueError(f"No matching files found for trim_{RAT} in {PATH_NEW}")
+        new_file = new_files[0]
 
     # Determine model loading strategy
+    part_lstm = part_gru = part_rnn = None
     if args.load == "none":
-        # Train from scratch
         MODEL_PATH = None
         LOAD = False
     elif args.load:
-        # Load specific model file
         MODEL_PATH = os.path.join(MODEL_DIR, os.path.basename(args.load))
         LOAD = True
     else:
-        # Auto-detect most recent models for all architectures
         part_lstm = get_latest_model("lstm", RAT)
         part_gru = get_latest_model("gru", RAT)
         part_rnn = get_latest_model("rnn", RAT)
@@ -178,55 +295,15 @@ if __name__ == "__main__":
             LOAD = False
 
     # Load and preprocess raw CSV data (skip if NPZ provided)
+    df, df_new = None, None
     if PATH and not DATA_NPZ:
-        # Process each training file: interpolate GPS gaps and compute rolling PDR
-        dfs = []
-        for file in files:
-            print(f"Processing training file: {file}")
-            df_part = pd.read_csv(os.path.join(PATH, file))
-            # Fill GPS gaps using linear interpolation and backward fill
-            df_part["tx_latitude"] = df_part["tx_latitude"].interpolate().bfill()
-            df_part["tx_longitude"] = df_part["tx_longitude"].interpolate().bfill()
-            print("Computing rolling PDR...")
-            df_part = compute_pdr_rolling(df_part, "tx_timestamp_ms", PDR_WINDOW, tx_interval)
-            dfs.append(df_part)
+        df = load_csv_data(PATH, files, PDR_WINDOW, tx_interval)
+        if PATH_NEW:
+            df_new = load_csv_data(PATH_NEW, [new_file], PDR_WINDOW, tx_interval)
 
-        # Concatenate all training files into single DataFrame
-        df = pd.concat(dfs, ignore_index=True)
-
-        # Process new data file for incremental learning
-        print(f"Processing new data file: {new_file}")
-        df_new = pd.read_csv(os.path.join(PATH_NEW, new_file))
-        df_new["tx_latitude"] = df_new["tx_latitude"].interpolate().bfill()
-        df_new["tx_longitude"] = df_new["tx_longitude"].interpolate().bfill()
-        print("Computing rolling PDR...")
-        df_new = compute_pdr_rolling(df_new, "tx_timestamp_ms", PDR_WINDOW, tx_interval)
-
-    # Load preprocessed data from NPZ or preprocess from DataFrames
-    if DATA_NPZ and os.path.exists(DATA_NPZ):
-        # Load preprocessed sequences from NPZ archive
-        data = np.load(DATA_NPZ)
-        X_train = data["x_train"]
-        y_train = data["y_train"]
-        X_new_data = data["x_new_data"]
-        y_new_data = data["y_new_data"]
-        print(f"Loaded preprocessed data: {X_train.shape[0]} training, {X_new_data.shape[0]} new samples")
-    else:
-        # Preprocess raw data: normalize features and generate LSTM sequences
-        print("Starting data preprocessing...")
-        print("Processing training set...")
-        (X_train, y_train, scalers) = preprocess_lstm_input(
-            df, new=True, rat=RAT, target_cols=TARGET_COLS, seq_length=TIMESTEPS)
-        print("Processing new data set...")
-        (X_new_data, y_new_data, scalers) = preprocess_lstm_input(
-            df_new, new=True, rat=RAT, target_cols=TARGET_COLS, seq_length=TIMESTEPS)
-        print("Preprocessing complete.")
-
-        # Cache preprocessed data for faster future runs
-        npz_path = os.path.join(OUTPUT_DIR, f"{RAT}_lstm_data.npz")
-        np.savez_compressed(npz_path, x_train=X_train, y_train=y_train,
-                            x_new_data=X_new_data, y_new_data=y_new_data)
-        print(f"Preprocessed data saved to: {npz_path}")
+    # Prepare training data
+    X_train, y_train, X_new_data, y_new_data = prepare_data(
+        df, df_new, RAT, DATA_NPZ, OUTPUT_DIR)
 
     # Convert targets to dictionary format for multi-output model
     y_train_dict = {
@@ -267,62 +344,32 @@ if __name__ == "__main__":
         elif not os.path.exists(MODEL_PATH):
             print("No existing model found, building new models...")
 
-        # Build all three model architectures
-        model_lstm = build_model("lstm", TIMESTEPS, FEATURES)
-        model_gru = build_model("gru", TIMESTEPS, FEATURES)
-        model_rnn = build_model("rnn", TIMESTEPS, FEATURES)
-
-        # Early stopping prevents overfitting by monitoring loss
-        early_stopping = EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
-
-        # Train LSTM model
-        print("=" * 60)
-        print("Training LSTM model...")
-        metrics_logger = MetricsLogger("lstm", RAT)
-        history_lstm = model_lstm.fit(X_train, y_train_dict, epochs=epochs, batch_size=BATCH_SIZE,
-                                       callbacks=[metrics_logger, early_stopping],
-                                       validation_split=VALIDATION_SPLIT, verbose=1)
-        save_path = os.path.join(MODEL_DIR, f"lstm_{RAT}_{int(time.time())}.keras")
-        model_lstm.save(save_path)
-        print(f"LSTM model saved to {save_path}")
-
-        # Train GRU model
-        print("=" * 60)
-        print("Training GRU model...")
-        metrics_logger = MetricsLogger("gru", RAT)
-        history_gru = model_gru.fit(X_train, y_train_dict, epochs=epochs, batch_size=BATCH_SIZE,
-                                     callbacks=[metrics_logger, early_stopping],
-                                     validation_split=VALIDATION_SPLIT, verbose=1)
-        save_path = os.path.join(MODEL_DIR, f"gru_{RAT}_{int(time.time())}.keras")
-        model_gru.save(save_path)
-        print(f"GRU model saved to {save_path}")
-
-        # Train SimpleRNN model
-        print("=" * 60)
-        print("Training SimpleRNN model...")
-        metrics_logger = MetricsLogger("rnn", RAT)
-        history_rnn = model_rnn.fit(X_train, y_train_dict, epochs=epochs, batch_size=BATCH_SIZE,
-                                     callbacks=[metrics_logger, early_stopping],
-                                     validation_split=VALIDATION_SPLIT, verbose=1)
-        save_path = os.path.join(MODEL_DIR, f"rnn_{RAT}_{int(time.time())}.keras")
-        model_rnn.save(save_path)
-        print(f"SimpleRNN model saved to {save_path}")
+        model_lstm, history_lstm = train_single_model(
+            "lstm", TIMESTEPS, FEATURES, X_train, y_train_dict, RAT, epochs)
+        model_gru, history_gru = train_single_model(
+            "gru", TIMESTEPS, FEATURES, X_train, y_train_dict, RAT, epochs)
+        model_rnn, history_rnn = train_single_model(
+            "rnn", TIMESTEPS, FEATURES, X_train, y_train_dict, RAT, epochs)
 
         # Persist training history as JSON for later analysis
-        with open(os.path.join(OUTPUT_DIR, f"lstm_{RAT}_training_history.json"), "w") as f:
-            json.dump(history_lstm.history, f)
-        with open(os.path.join(OUTPUT_DIR, f"gru_{RAT}_training_history.json"), "w") as f:
-            json.dump(history_gru.history, f)
-        with open(os.path.join(OUTPUT_DIR, f"rnn_{RAT}_training_history.json"), "w") as f:
-            json.dump(history_rnn.history, f)
+        for mtype, history in [("lstm", history_lstm), ("gru", history_gru), ("rnn", history_rnn)]:
+            with open(os.path.join(OUTPUT_DIR, f"{mtype}_{RAT}_training_history.json"), "w") as f:
+                json.dump(history.history, f)
 
     # Incremental learning: retrain models with new data in streaming fashion
-    print("=" * 60)
-    print("Starting automatic incremental retraining...")
-    print("=" * 60)
-    automatic_train(model_lstm, X_new_data, y_new_data, 32, 500, 0.15,
-                    os.path.join(OUTPUT_DIR, f"prediction_log_lstm_{RAT}.csv"), RAT, "lstm")
-    automatic_train(model_gru, X_new_data, y_new_data, 32, 500, 0.15,
-                    os.path.join(OUTPUT_DIR, f"prediction_log_gru_{RAT}.csv"), RAT, "gru")
-    automatic_train(model_rnn, X_new_data, y_new_data, 32, 500, 0.15,
-                    os.path.join(OUTPUT_DIR, f"prediction_log_rnn_{RAT}.csv"), RAT, "rnn")
+    if X_new_data is not None:
+        print("=" * 60)
+        print("Starting automatic incremental retraining...")
+        print("=" * 60)
+        automatic_train(model_lstm, X_new_data, y_new_data, 32, 500, 0.15,
+                        os.path.join(OUTPUT_DIR, f"prediction_log_lstm_{RAT}.csv"), RAT, "lstm")
+        automatic_train(model_gru, X_new_data, y_new_data, 32, 500, 0.15,
+                        os.path.join(OUTPUT_DIR, f"prediction_log_gru_{RAT}.csv"), RAT, "gru")
+        automatic_train(model_rnn, X_new_data, y_new_data, 32, 500, 0.15,
+                        os.path.join(OUTPUT_DIR, f"prediction_log_rnn_{RAT}.csv"), RAT, "rnn")
+    else:
+        print("No new data provided. Skipping incremental retraining.")
+
+
+if __name__ == "__main__":
+    main()

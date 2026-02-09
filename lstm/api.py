@@ -24,6 +24,7 @@ from config import (
     PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS,
     PACKET_SIZE_BOUNDS,
     create_gps_scaler, create_latency_scaler,
+    create_sinr_5g_scaler, create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
 )
 from utils import get_latest_model
 from model import rmse
@@ -61,6 +62,9 @@ class RATSelectionAPI:
         self.models: Dict[str, object] = {}
         self.gps_scaler = create_gps_scaler()
         self.latency_scaler = create_latency_scaler()
+        self.sinr_5g_scaler = create_sinr_5g_scaler()
+        self.rsrp_5g_scaler = create_rsrp_5g_scaler()
+        self.rsrp_dsrc_scaler = create_rsrp_dsrc_scaler()
 
         # Configurable thresholds
         self.pdr_threshold = PDR_RELIABILITY_THRESHOLD
@@ -111,7 +115,9 @@ class RATSelectionAPI:
             rsrp = state.fiveg_rsrp or 0.0
             pdr = state.fiveg_pdr or 0.0
             latency_norm = self.latency_scaler.transform([[latency]])[0][0]
-            return np.array([lat_lon[0], lat_lon[1], latency_norm, sinr, rsrp, pdr])
+            sinr_norm = self.sinr_5g_scaler.transform([[sinr]])[0][0]
+            rsrp_norm = self.rsrp_5g_scaler.transform([[rsrp]])[0][0]
+            return np.array([lat_lon[0], lat_lon[1], latency_norm, sinr_norm, rsrp_norm, pdr])
 
         elif rat == "pc5":
             # Features: lat, lon, latency, pdr
@@ -127,7 +133,9 @@ class RATSelectionAPI:
             latency = state.dsrc_latency_ms or 0.0
             pdr = state.dsrc_pdr or 0.0
             latency_norm = self.latency_scaler.transform([[latency]])[0][0]
-            return np.array([lat_lon[0], lat_lon[1], rsrp_1, rsrp_2, latency_norm, pdr])
+            rsrp_1_norm = self.rsrp_dsrc_scaler.transform([[rsrp_1]])[0][0]
+            rsrp_2_norm = self.rsrp_dsrc_scaler.transform([[rsrp_2]])[0][0]
+            return np.array([lat_lon[0], lat_lon[1], rsrp_1_norm, rsrp_2_norm, latency_norm, pdr])
 
         else:
             raise ValueError(f"Unknown RAT: {rat}")

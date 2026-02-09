@@ -224,7 +224,7 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
 
     # Initialize prediction log file with header
     with open(log_file, "w") as f:
-        f.write("latitude,longitude,pred_latency,actual_latency,rmse_latency,pred_pdr,actual_pdr,rmse_pdr\n")
+        f.write("latitude,longitude,pred_latency,actual_latency,mae_latency,squared_error_latency,pred_pdr,actual_pdr,mae_pdr,squared_error_pdr\n")
 
     # Buffers for accumulating samples before retraining
     x_new, y_new = [], []
@@ -242,30 +242,34 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
 
         # Trigger retraining every N samples
         if len(x_new) >= N:
-            # Log predictions for all accumulated samples
+            # Batch predict all accumulated samples at once
+            x_batch = np.array(x_new)
+            preds = model.predict(x_batch, verbose=0)
+            pred_latencies_norm = preds[0].flatten()
+            pred_pdrs_norm = preds[1].flatten()
+
+            # Batch inverse transforms
+            lat_lons = gps_scaler.inverse_transform(x_batch[:, -1, :2])
+            pred_latencies = latency_scaler.inverse_transform(
+                pred_latencies_norm.reshape(-1, 1)).flatten()
+            pred_pdrs = np.clip(pred_pdrs_norm, 0.0, 1.0)
+
+            y_arr = np.array(y_new)
+            actual_latencies = latency_scaler.inverse_transform(
+                y_arr[:, 0].reshape(-1, 1)).flatten()
+            actual_pdrs = np.clip(y_arr[:, 1], 0.0, 1.0)
+
+            # Compute errors vectorized
+            mae_lats = np.abs(pred_latencies - actual_latencies)
+            se_lats = (pred_latencies - actual_latencies) ** 2
+            mae_pdrs_arr = np.abs(pred_pdrs - actual_pdrs)
+            se_pdrs_arr = (pred_pdrs - actual_pdrs) ** 2
+
             for j in range(len(x_new)):
-                # Extract GPS coordinates from last timestep (inverse transform)
-                scaled_lat_lon = x_new[j][-1][:2].reshape(1, -1)
-                lat, lon = gps_scaler.inverse_transform(scaled_lat_lon)[0]
-
-                # Make prediction
-                pred = model.predict(np.expand_dims(x_new[j], axis=0), verbose=0)
-
-                # Extract and denormalize predictions
-                pred_latency, pred_pdr = pred[0].flatten()[0], pred[1].flatten()[0]
-                pred_latency = latency_scaler.inverse_transform(np.array(pred_latency).reshape(-1, 1))[0][0]
-                pred_pdr = max(0.0, min(pred_pdr, 1.0))  # Clamp PDR to [0, 1]
-
-                # Extract and denormalize actual values
-                actual_latency, actual_pdr = y_new[j][0], y_new[j][1]
-                actual_latency = latency_scaler.inverse_transform(np.array(actual_latency).reshape(-1, 1))[0][0]
-                actual_pdr = max(0.0, min(actual_pdr, 1.0))
-
-                # Compute absolute errors
-                rmse_latency = abs(pred_latency - actual_latency)
-                rmse_pdr = abs(pred_pdr - actual_pdr)
-
-                log_entries.append(f"{lat},{lon},{pred_latency},{actual_latency},{rmse_latency},{pred_pdr},{actual_pdr},{rmse_pdr}")
+                log_entries.append(
+                    f"{lat_lons[j, 0]},{lat_lons[j, 1]},"
+                    f"{pred_latencies[j]},{actual_latencies[j]},{mae_lats[j]},{se_lats[j]},"
+                    f"{pred_pdrs[j]},{actual_pdrs[j]},{mae_pdrs_arr[j]},{se_pdrs_arr[j]}")
 
             # Prepare targets for multi-output model training
             y_new_dict = {

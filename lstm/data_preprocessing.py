@@ -105,15 +105,15 @@ def generate_lstm_sequences(data, feature_cols, target_cols, seq_length, batch_s
     """
     num_samples = len(data) - seq_length
 
-    for i in tqdm(range(0, num_samples, batch_size), desc="Generating sequences", unit="batch"):
-        x_batch, y_batch = [], []
-        for j in range(i, min(i + batch_size, num_samples)):
-            # Extract seq_length timesteps as input features
-            x_batch.append(data[feature_cols].iloc[j: j + seq_length].values)
-            # Target is the next timestep after the sequence
-            y_batch.append(data[target_cols].iloc[j + seq_length].values)
+    # Extract numpy arrays once for fast slicing (avoids DataFrame.iloc overhead per iteration)
+    features = data[feature_cols].values
+    targets = data[target_cols].values
 
-        yield np.array(x_batch), np.array(y_batch)
+    for i in tqdm(range(0, num_samples, batch_size), desc="Generating sequences", unit="batch"):
+        end = min(i + batch_size, num_samples)
+        x_batch = np.array([features[j: j + seq_length] for j in range(i, end)])
+        y_batch = targets[i + seq_length: end + seq_length]
+        yield x_batch, y_batch
 
 
 def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
