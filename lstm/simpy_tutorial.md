@@ -2,7 +2,7 @@
 
 SimPy is a **discrete-event simulation** library. Instead of stepping through time tick-by-tick, it jumps directly from one event to the next, making it very efficient.
 
-This document is both a SimPy primer and a mapping of SimPy concepts to their concrete usage in `queue_simulator.py`. If you are new to the project, read top-to-bottom. If you already know SimPy, skip to [How SimPy Is Used In This Project](#how-simpy-is-used-in-this-project).
+This document is both a SimPy primer and a mapping of SimPy concepts to their concrete usage in `queuesim/queue_simulator.py`. If you are new to the project, read top-to-bottom. If you already know SimPy, skip to [How SimPy Is Used In This Project](#how-simpy-is-used-in-this-project).
 
 ---
 
@@ -60,7 +60,7 @@ env.run(until=100)            # Run until time=100
 
 ## How SimPy Is Used In This Project
 
-All SimPy usage lives in **`queue_simulator.py`**, specifically inside `IntegratedQueueSimulator`. The rest of the codebase (model training, RAT selection, etc.) has no SimPy dependency. SimPy serves as the event loop that ties the packet queue, the DTMC packet sizer, the RAT selector, and the PHY-layer model together into a time-coherent simulation.
+All SimPy usage lives in **`queuesim/queue_simulator.py`**, specifically inside `IntegratedQueueSimulator`. The rest of the codebase (model training, RAT selection, etc.) has no SimPy dependency. SimPy serves as the event loop that ties the packet queue, the DTMC packet sizer, the RAT selector, and the PHY-layer model together into a time-coherent simulation.
 
 ### Overall Architecture
 
@@ -97,7 +97,7 @@ Everything else (DTMC transitions, PHY capacity checks, PDR correction) runs syn
 
 ### Environment Creation and Process Registration
 
-From `IntegratedQueueSimulator.run()` (line 1174):
+From `IntegratedQueueSimulator.run()` in `queuesim/queue_simulator.py`:
 
 ```python
 # Create SimPy environment
@@ -119,7 +119,7 @@ The `simpy.Store` here is **unbounded** at the SimPy level. Queue bounding is en
 
 ### Process 1: Packet Generator (`_packet_generator`)
 
-Source: `queue_simulator.py`, line 992.
+Source: `queuesim/queue_simulator.py`, `_packet_generator` method.
 
 This generator creates packets at a fixed rate derived from `TX_INTERVAL_MS` (default 100 ms = 10 Hz). Each iteration:
 
@@ -156,10 +156,10 @@ def _packet_generator(self, env: simpy.Environment, queue: simpy.Store):
         packet_id += 1
 ```
 
-The `can_enqueue` check (line 1006) queries `QueueSimulator`, which computes the byte-level capacity from PHY parameters:
+The `can_enqueue` check queries `QueueSimulator`, which computes the byte-level capacity from PHY parameters:
 
 ```python
-# QueueSimulator.can_enqueue() -- line 659
+# QueueSimulator.can_enqueue() in queuesim/queue_simulator.py
 capacity_bytes = calculate_queue_capacity_bytes(target_rat, TX_INTERVAL_MS)
 return (self.queue_bytes + packet_size) <= capacity_bytes
 ```
@@ -170,7 +170,7 @@ The capacity itself comes from a resource-block formula in the PHY helpers (see 
 
 ### Process 2: Packet Processor (`_packet_processor`)
 
-Source: `queue_simulator.py`, line 1025.
+Source: `queuesim/queue_simulator.py`, `_packet_processor` method.
 
 This generator is the core simulation loop. Each iteration:
 
@@ -239,7 +239,7 @@ The `_stop_simulation` flag is the primary coordination mechanism between the tw
 
 ## DTMC Packet Sizer and SimPy
 
-The `DTMCPacketSizer` class (line 249) is **not** a SimPy process. It is a stateful object that is called synchronously from inside the processor process. SimPy provides the clock; the DTMC provides the state machine.
+The `DTMCPacketSizer` class (in `queuesim/dtmc_sizer.py`) is **not** a SimPy process. It is a stateful object that is called synchronously from inside the processor process. SimPy provides the clock; the DTMC provides the state machine.
 
 ### State Diagram
 
@@ -249,7 +249,7 @@ The `DTMCPacketSizer` class (line 249) is **not** a SimPy process. It is a state
     +----PDR>0.99-------->-+----PDR>0.99-------->-+----PDR>0.99-------->-+
 ```
 
-Size levels are defined in `config.py` as `DTMC_PACKET_SIZES = [1024, 2048, 3072, 4096]`.
+Size levels are defined in `config.py` (project root) as `DTMC_PACKET_SIZES = [1024, 2048, 3072, 4096]`.
 
 ### How the DTMC Uses Simulation Time
 
@@ -268,7 +268,7 @@ _packet_processor
         --> dtmc.record_outcome(timestamp, delivered) # stores (env.now, bool)
 ```
 
-The DTMC's `transition()` method (line 356) is deterministic:
+The DTMC's `transition()` method is deterministic:
 
 ```python
 def transition(self, pdr: float, step: int = 0) -> int:
@@ -280,7 +280,7 @@ def transition(self, pdr: float, step: int = 0) -> int:
     return self.current_size
 ```
 
-Thresholds are configurable in `config.py`:
+Thresholds are configurable in `config.py` (project root):
 - `DTMC_THRESHOLD_HIGH = 0.99` -- PDR above this triggers an increase.
 - `DTMC_THRESHOLD_LOW = 0.95` -- PDR below this triggers a decrease.
 
@@ -289,7 +289,7 @@ Thresholds are configurable in `config.py`:
 When the DTMC has insufficient history (fewer than 5 samples in the window), it falls back to the **predicted PDR** from the RAT selector, corrected for the current packet size using a power-law model:
 
 ```python
-# correct_pdr_for_packet_size() -- line 417
+# correct_pdr_for_packet_size() in queuesim/dtmc_sizer.py
 effective_exponent = (target_size / base_size) ** correction_exponent
 corrected_pdr = base_pdr ** effective_exponent
 ```
@@ -302,7 +302,7 @@ Once enough real outcomes accumulate in the moving window, the DTMC switches to 
 
 ## PHY-Layer Capacity Model and SimPy
 
-The PHY helpers (lines 57-243 in `queue_simulator.py`) compute TX capacity and queue bounds per RAT. They are pure functions, not SimPy processes. They feed into the simulation at two points:
+The PHY helpers (in `queuesim/phy_layer.py`) compute TX capacity and queue bounds per RAT. They are pure functions, not SimPy processes. They feed into the simulation at two points:
 
 1. **Before enqueue** (generator process): `can_enqueue()` checks if adding a packet would exceed the byte budget.
 2. **During TX simulation** (processor process): `calculate_tx_time_ms()` determines how long transmission takes, which becomes the `env.timeout()` duration.
@@ -325,7 +325,7 @@ TX capacity per interval = `bits_per_ms x TX_INTERVAL_MS / 8` (bytes).
 
 Queue capacity = TX capacity x `queue_multiplier` (default 2, from `config.py`).
 
-### PHY Constants (from `config.py`)
+### PHY Constants (from `config.py`, project root)
 
 | RAT | Bandwidth | NRB | Modulation | Coding Rate | Base Latency |
 |-----|-----------|-----|------------|-------------|--------------|
@@ -368,7 +368,7 @@ Time (s)  Event
 
 To avoid confusion, here is what is handled outside SimPy:
 
-- **RAT selection logic** -- pure Python in `rat_selection.py` or precomputed CSV.
+- **RAT selection logic** -- pure Python in `selection/rat_selection.py` or precomputed CSV.
 - **DTMC state transitions** -- synchronous calls inside the processor process.
 - **Queue byte tracking** -- manual counters in `QueueSimulator` (not SimPy `Container`).
 - **PHY capacity computation** -- pure functions, no events.
@@ -382,13 +382,13 @@ SimPy provides exactly two things: **(1)** a shared clock (`env.now`) and **(2)*
 
 | SimPy Concept | Project Usage | Location |
 |---------------|---------------|----------|
-| `Environment()` | `self.env` in `IntegratedQueueSimulator.run()` | line 1175 |
-| `env.timeout(t)` | Inter-arrival pacing and TX delay | lines 998, 1135 |
-| `Store(env)` | Packet FIFO between generator and processor | line 1176 |
-| `store.put(x)` | Enqueue packet dict with arrival_time, id, size | line 1016 |
-| `store.get()` | Dequeue next packet (blocks if empty) | line 1032 |
-| `env.process(g)` | Register generator and processor | lines 1179-1180 |
-| `env.run(until=t)` | Execute simulation | line 1184 |
+| `Environment()` | `self.env` in `IntegratedQueueSimulator.run()` | `queuesim/queue_simulator.py` |
+| `env.timeout(t)` | Inter-arrival pacing and TX delay | `_packet_generator`, `_packet_processor` |
+| `Store(env)` | Packet FIFO between generator and processor | `run()` method |
+| `store.put(x)` | Enqueue packet dict with arrival_time, id, size | `_packet_generator` |
+| `store.get()` | Dequeue next packet (blocks if empty) | `_packet_processor` |
+| `env.process(g)` | Register generator and processor | `run()` method |
+| `env.run(until=t)` | Execute simulation | `run()` method |
 | `env.now` | Timestamp for DTMC window, metrics, state lookup | throughout |
 
 ---
@@ -425,13 +425,13 @@ This shows `Resource` -- another SimPy primitive for limited resources. Our simu
 
 ```bash
 # Generate RAT decisions first
-python rat_selection.py --input /path/to/matched_data --mode api_batch --output rat_decisions.csv
+python -m selection.rat_selection --input /path/to/matched_data --mode api_batch --output rat_decisions.csv
 
 # Run queue simulation with PHY constraints
-python queue_simulator.py --input rat_decisions.csv --output sim_results.csv
+python -m queuesim.queue_simulator --input rat_decisions.csv --output sim_results.csv
 
 # Run without PHY constraints (for comparison)
-python queue_simulator.py --input rat_decisions.csv --output sim_results_no_phy.csv --no-phy-limits
+python -m queuesim.queue_simulator --input rat_decisions.csv --output sim_results_no_phy.csv --no-phy-limits
 ```
 
 ---
@@ -440,6 +440,8 @@ python queue_simulator.py --input rat_decisions.csv --output sim_results_no_phy.
 
 - SimPy Documentation: https://simpy.readthedocs.io/
 - SimPy in 10 Minutes: https://simpy.readthedocs.io/en/latest/simpy_intro/index.html
-- Our implementation: `queue_simulator.py`
-- PHY and DTMC constants: `config.py`
-- Data structures exchanged between components: `api_types.py`
+- Our implementation: `queuesim/queue_simulator.py`
+- PHY helpers: `queuesim/phy_layer.py`
+- DTMC packet sizer: `queuesim/dtmc_sizer.py`
+- PHY and DTMC constants: `config.py` (project root)
+- Data structures exchanged between components: `api_types.py` (project root)

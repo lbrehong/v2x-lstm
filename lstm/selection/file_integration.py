@@ -9,7 +9,10 @@ Two modes are supported:
   then queue simulator processes the output.
 - Phase 2 (Interleaved): Row-by-row file exchange for coupling study.
 """
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 from typing import Optional, List, Dict, Callable
 import pandas as pd
@@ -18,7 +21,7 @@ from api_types import (
     RATType, NetworkState, QueueContext, RATDecision,
     PacketSizeDecision, TransmissionOutcome,
 )
-from api import RATSelectionAPI
+from selection.api import RATSelectionAPI
 from config import OUTPUT_DIR
 
 

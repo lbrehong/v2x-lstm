@@ -34,7 +34,7 @@ The predictions enable proactive RAT selection, allowing vehicles to switch to t
 Install required packages:
 
 ```bash
-pip install tensorflow pandas numpy scikit-learn matplotlib tqdm folium scipy tabulate python-dotenv
+pip install tensorflow pandas numpy scikit-learn matplotlib tqdm folium scipy tabulate python-dotenv simpy
 ```
 
 For CPU-only TensorFlow (recommended for most setups):
@@ -54,18 +54,39 @@ cd lstm
 
 ```
 lstm/
-|-- main.py                 # Training entry point, metrics logging
-|-- model.py                # Neural network architectures, incremental learning
-|-- data_preprocessing.py   # PDR computation, normalization, sequence generation
-|-- rat_selection.py        # RAT selection algorithms, visualization, statistics
-|-- trimmers-combined.py    # Raw log file processing, drift compensation
-|-- prepare-for-last.py     # Cross-RAT GPS matching
-|-- config.py               # Centralized configuration and scalers
-|-- utils.py                # File discovery and model loading utilities
-|-- plot_history.py         # Training history visualization
-|-- models/                 # Saved Keras models (.keras files)
-|-- output/                 # Prediction logs, training logs, visualizations
-`-- CLAUDE.md               # AI assistant guidelines
+|-- config.py                      # Centralized configuration: bounds, hyperparameters, scalers
+|-- api_types.py                   # Data structures for queue simulator integration
+|-- utils.py                       # Utility functions: file discovery, model loading
+|
+|-- learning/                      # ML training pipeline
+|   |-- main.py                    # Training entry point, MetricsLogger callback, incremental learning
+|   |-- model.py                   # Network architectures, dual-output heads, DataStreamGenerator
+|   `-- data_preprocessing.py      # PDR rolling computation, MinMaxScaler, sequence generation
+|
+|-- queuesim/                      # Queue simulator + PHY layer
+|   |-- queue_simulator.py         # SimPy-based queue simulator with DTMC packet sizing
+|   |-- phy_layer.py               # PHY-layer capacity calculations per RAT
+|   |-- dtmc_sizer.py              # DTMC adaptive packet sizer
+|   `-- sim_types.py               # TransmissionRecord, SimulationMetrics
+|
+|-- selection/                     # RAT selection API + integration
+|   |-- api.py                     # RATSelectionAPI and JointController classes
+|   |-- rat_selection.py           # RAT selection algorithms, Folium visualization, statistics
+|   `-- file_integration.py        # File-based integration for batch/interleaved processing
+|
+|-- scripts/                       # Data prep & visualization CLI tools
+|   |-- trimmers.py                # Raw V2X/5G log processing, latency drift compensation
+|   |-- prepare_data.py            # Cross-RAT data matching by GPS coordinates
+|   `-- plot_history.py            # Training history visualization
+|
+|-- legacy/                        # Deprecated files (archived)
+|   |-- trimmers.py                # Old trimmer version
+|   `-- linaer.py                  # One-off drift compensation script
+|
+|-- tests/                         # Unit tests for all modules
+|-- models/                        # Saved Keras models (.keras files)
+|-- output/                        # Prediction logs, training logs, visualizations
+`-- CLAUDE.md                      # AI assistant guidelines
 ```
 
 ## Usage
@@ -77,7 +98,7 @@ lstm/
 Process raw V2X and 5G log files into standardized CSVs:
 
 ```bash
-python trimmers-combined.py --folder /path/to/raw_logs
+python -m scripts.trimmers --folder /path/to/raw_logs
 ```
 
 This generates `trim_5g.csv`, `trim_pc5.csv`, and `trim_dsrc.csv`.
@@ -87,7 +108,7 @@ This generates `trim_5g.csv`, `trim_pc5.csv`, and `trim_dsrc.csv`.
 Align data from different RATs by GPS coordinates:
 
 ```bash
-python prepare-for-last.py --input /path/to/trimmed_data
+python -m scripts.prepare_data --input /path/to/trimmed_data
 ```
 
 Outputs `matched_5g.csv`, `matched_pc5.csv`, `matched_dsrc.csv`, and `super.csv`.
@@ -99,7 +120,7 @@ Outputs `matched_5g.csv`, `matched_pc5.csv`, `matched_dsrc.csv`, and `super.csv`
 Train LSTM, GRU, and RNN models for a specific RAT:
 
 ```bash
-python main.py --rat 5g --model lstm --data /path/to/training_logs --new_data /path/to/new_logs
+python -m learning.main --rat 5g --model lstm --data /path/to/training_logs --new_data /path/to/new_logs
 ```
 
 #### Using Preprocessed Data
@@ -107,7 +128,7 @@ python main.py --rat 5g --model lstm --data /path/to/training_logs --new_data /p
 Skip CSV processing by loading from NPZ archive:
 
 ```bash
-python main.py --rat pc5 --model gru --npz /path/to/pc5_lstm_data.npz
+python -m learning.main --rat pc5 --model gru --npz /path/to/pc5_lstm_data.npz
 ```
 
 #### Training Options
@@ -127,7 +148,7 @@ python main.py --rat pc5 --model gru --npz /path/to/pc5_lstm_data.npz
 #### Generate Predictions for All RATs
 
 ```bash
-python rat_selection.py --input /path/to/matched_data --model_type all
+python -m selection.rat_selection --input /path/to/matched_data --model_type all
 ```
 
 This runs predictions for all model types across all RATs and generates `bestRAT_super.csv`.
@@ -135,7 +156,7 @@ This runs predictions for all model types across all RATs and generates `bestRAT
 #### Visualize RAT Selection on Map
 
 ```bash
-python rat_selection.py --input /path/to/bestRAT_super.csv --mode view
+python -m selection.rat_selection --input /path/to/bestRAT_super.csv --mode view
 ```
 
 Generates interactive HTML maps showing which RAT was selected at each location.
@@ -143,7 +164,7 @@ Generates interactive HTML maps showing which RAT was selected at each location.
 #### Generate Statistics and Plots
 
 ```bash
-python rat_selection.py --input /path/to/bestRAT_super.csv --mode data
+python -m selection.rat_selection --input /path/to/bestRAT_super.csv --mode data
 ```
 
 Outputs:
@@ -154,7 +175,7 @@ Outputs:
 ### Visualize Training History
 
 ```bash
-python plot_history.py
+python -m scripts.plot_history
 # Enter RAT when prompted: 5g, pc5, or dsrc
 ```
 
@@ -175,7 +196,7 @@ EARLY_STOPPING_PATIENCE = 5 # Epochs before early stop
 ### Data Collection Parameters
 
 ```python
-TX_INTERVAL_MS = 20         # Packet transmission interval (ms)
+TX_INTERVAL_MS = 100        # Packet transmission interval (ms)
 PDR_WINDOW = 10             # Rolling PDR window (seconds)
 ```
 
@@ -194,7 +215,7 @@ MIN_LAT, MAX_LAT = 43.554669, 43.568290
 MIN_LON, MAX_LON = 1.463952, 1.472176
 ```
 
-## Model Architecture
+## Model Architecture (`learning/model.py`)
 
 The dual-output architecture predicts both latency and PDR simultaneously:
 
@@ -266,18 +287,18 @@ The opportunistic (baseline) algorithm uses current measurements with sticky swi
 Raw Logs (5G, PC5, DSRC)
          |
          v
-trimmers-combined.py  -->  Trimmed CSVs (drift-compensated, GPS-enriched)
+scripts/trimmers.py     -->  Trimmed CSVs (drift-compensated, GPS-enriched)
          |
          v
-prepare-for-last.py   -->  Matched CSVs (aligned by GPS)
+scripts/prepare_data.py -->  Matched CSVs (aligned by GPS)
          |
          v
-main.py               -->  LSTM Sequences (normalized, windowed)
+learning/main.py        -->  LSTM Sequences (normalized, windowed)
          |
          v
-Training/Inference    -->  Predictions + Retrained Models
+Training/Inference      -->  Predictions + Retrained Models
          |
          v
-rat_selection.py      -->  RAT Selection + Visualization + Statistics
+selection/rat_selection.py -->  RAT Selection + Visualization + Statistics
 ```
 

@@ -5,12 +5,15 @@ Loads saved training history JSON files and plots training vs validation
 loss curves for visual analysis of model convergence.
 
 Usage:
-    python plot_history.py
+    python -m scripts.plot_history
     # Enter RAT when prompted: 5g, pc5, or dsrc
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import matplotlib.pyplot as plt
 import json
-import os
 
 from config import OUTPUT_DIR
 

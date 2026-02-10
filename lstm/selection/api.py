@@ -27,8 +27,8 @@ from config import (
     create_sinr_5g_scaler, create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
 )
 from utils import get_latest_model
-from model import rmse
-from data_preprocessing import preprocess_lstm_input
+from learning.model import rmse
+from learning.data_preprocessing import preprocess_lstm_input
 
 
 class RATSelectionAPI:

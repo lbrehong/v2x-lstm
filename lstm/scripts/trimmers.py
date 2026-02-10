@@ -11,10 +11,13 @@ extracting relevant fields and performing necessary corrections:
 The output files are standardized CSVs ready for the prediction pipeline.
 
 Usage:
-    python trimmers-combined.py --folder /path/to/raw_logs
+    python -m scripts.trimmers --folder /path/to/raw_logs
 """
-import re
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import re
 import argparse
 
 import pandas as pd

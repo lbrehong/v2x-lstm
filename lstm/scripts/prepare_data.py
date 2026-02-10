@@ -12,15 +12,18 @@ The matching process:
 4. Creates unified dataset with all RATs at matching locations
 
 Usage:
-    python prepare-for-last.py --input /path/to/trimmed_data
+    python -m scripts.prepare_data --input /path/to/trimmed_data
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pandas as pd
 import numpy as np
-import os
 import argparse
 
 from config import TX_INTERVAL_MS, PDR_WINDOW
-from data_preprocessing import compute_pdr_rolling
+from learning.data_preprocessing import compute_pdr_rolling
 
 # Input file configuration
 PRIMARY = "5g.csv"  # Reference RAT for GPS coordinates

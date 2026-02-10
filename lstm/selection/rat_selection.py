@@ -9,11 +9,14 @@ This module implements:
 - RMSE analysis and comparison tables
 
 Usage:
-    python rat_selection.py --input /path/to/csv_folder --model_type all
-    python rat_selection.py --input /path/to/csv --mode view
-    python rat_selection.py --input /path/to/csv --mode data
+    python -m selection.rat_selection --input /path/to/csv_folder --model_type all
+    python -m selection.rat_selection --input /path/to/csv --mode view
+    python -m selection.rat_selection --input /path/to/csv --mode data
 """
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -29,9 +32,9 @@ from config import (
     create_gps_scaler, create_latency_scaler,
 )
 from utils import get_latest_model
-from model import rmse, automatic_train
-from data_preprocessing import preprocess_lstm_input
-from file_integration import process_batch
+from learning.model import rmse, automatic_train
+from learning.data_preprocessing import preprocess_lstm_input
+from selection.file_integration import process_batch
 
 # Initialize scalers for coordinate and latency transformations
 gps_scaler = create_gps_scaler()

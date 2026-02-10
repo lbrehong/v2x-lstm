@@ -8,9 +8,13 @@ This module handles:
 - Automatic retraining workflow
 
 Usage:
-    python main.py --rat <5g|pc5|dsrc> --model <lstm|gru|rnn> --data /path/to/logs
-    python main.py --rat <5g|pc5|dsrc> --model <lstm|gru|rnn> --npz /path/to/preprocessed.npz
+    python -m learning.main --rat <5g|pc5|dsrc> --model <lstm|gru|rnn> --data /path/to/logs
+    python -m learning.main --rat <5g|pc5|dsrc> --model <lstm|gru|rnn> --npz /path/to/preprocessed.npz
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -18,7 +22,6 @@ import time
 import argparse
 import json
 import csv
-import os
 import pandas as pd
 import numpy as np
 import warnings
@@ -37,8 +40,8 @@ from config import (
     FEATURES_COUNT,
 )
 from utils import find_files_with_string, get_latest_model, ensure_dir_exists
-from data_preprocessing import preprocess_lstm_input, compute_pdr_rolling
-from model import build_model, automatic_train, rmse
+from learning.data_preprocessing import preprocess_lstm_input, compute_pdr_rolling
+from learning.model import build_model, automatic_train, rmse
 
 
 class MetricsLogger(Callback):
