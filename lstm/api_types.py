@@ -13,6 +13,15 @@ from typing import Optional, Dict, Tuple, Any
 from enum import Enum
 
 
+def _parse_bool(value) -> bool:
+    """Parse a boolean from various types, handling string 'False'/'True' correctly."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("true", "1")
+    return bool(value)
+
+
 class RATType(Enum):
     """Radio Access Technology types supported by the system."""
     DSRC = "dsrc"
@@ -329,6 +338,6 @@ class TransmissionOutcome:
             rat_used=RATType.from_string(d["rat_used"]),
             packet_size_bytes=int(d["packet_size_bytes"]),
             actual_latency_ms=float(d["actual_latency_ms"]),
-            delivered=bool(d["delivered"]),
+            delivered=_parse_bool(d["delivered"]),
             network_state=network_state,
         )

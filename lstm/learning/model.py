@@ -193,6 +193,51 @@ def generate_new_measurement(x_new_data, y_new_data, index):
     return x_new.reshape(1, *x_new.shape), y_new.reshape(1, *y_new.shape)
 
 
+def _process_batch(model, x_new, y_new, gps_scaler, latency_scaler):
+    """
+    Predict on a batch and compute MAE/RMSE metrics.
+
+    Args:
+        model: Keras model
+        x_new: List of input sequences
+        y_new: List of target arrays
+        gps_scaler: Scaler for GPS inverse transform
+        latency_scaler: Scaler for latency inverse transform
+
+    Returns:
+        List of CSV log entry strings
+    """
+    x_batch = np.array(x_new)
+    preds = model.predict(x_batch, verbose=0)
+    pred_latencies_norm = preds[0].flatten()
+    pred_pdrs_norm = preds[1].flatten()
+
+    # Batch inverse transforms
+    lat_lons = gps_scaler.inverse_transform(x_batch[:, -1, :2])
+    pred_latencies = latency_scaler.inverse_transform(
+        pred_latencies_norm.reshape(-1, 1)).flatten()
+    pred_pdrs = np.clip(pred_pdrs_norm, 0.0, 1.0)
+
+    y_arr = np.array(y_new)
+    actual_latencies = latency_scaler.inverse_transform(
+        y_arr[:, 0].reshape(-1, 1)).flatten()
+    actual_pdrs = np.clip(y_arr[:, 1], 0.0, 1.0)
+
+    # Compute errors vectorized
+    mae_lats = np.abs(pred_latencies - actual_latencies)
+    rmse_lat = np.sqrt(np.mean((pred_latencies - actual_latencies) ** 2))
+    mae_pdrs_arr = np.abs(pred_pdrs - actual_pdrs)
+    rmse_pdr = np.sqrt(np.mean((pred_pdrs - actual_pdrs) ** 2))
+
+    entries = []
+    for j in range(len(x_new)):
+        entries.append(
+            f"{lat_lons[j, 0]},{lat_lons[j, 1]},"
+            f"{pred_latencies[j]},{actual_latencies[j]},{mae_lats[j]},{rmse_lat},"
+            f"{pred_pdrs[j]},{actual_pdrs[j]},{mae_pdrs_arr[j]},{rmse_pdr}")
+    return entries
+
+
 def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validation=0.15,
                     log_file="prediction_log.csv", rat="dsrc", model_type="lstm"):
     """
@@ -224,7 +269,7 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
 
     # Initialize prediction log file with header
     with open(log_file, "w") as f:
-        f.write("latitude,longitude,pred_latency,actual_latency,mae_latency,squared_error_latency,pred_pdr,actual_pdr,mae_pdr,squared_error_pdr\n")
+        f.write("latitude,longitude,pred_latency,actual_latency,mae_latency,rmse_latency,pred_pdr,actual_pdr,mae_pdr,rmse_pdr\n")
 
     # Buffers for accumulating samples before retraining
     x_new, y_new = [], []
@@ -242,34 +287,7 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
 
         # Trigger retraining every N samples
         if len(x_new) >= N:
-            # Batch predict all accumulated samples at once
-            x_batch = np.array(x_new)
-            preds = model.predict(x_batch, verbose=0)
-            pred_latencies_norm = preds[0].flatten()
-            pred_pdrs_norm = preds[1].flatten()
-
-            # Batch inverse transforms
-            lat_lons = gps_scaler.inverse_transform(x_batch[:, -1, :2])
-            pred_latencies = latency_scaler.inverse_transform(
-                pred_latencies_norm.reshape(-1, 1)).flatten()
-            pred_pdrs = np.clip(pred_pdrs_norm, 0.0, 1.0)
-
-            y_arr = np.array(y_new)
-            actual_latencies = latency_scaler.inverse_transform(
-                y_arr[:, 0].reshape(-1, 1)).flatten()
-            actual_pdrs = np.clip(y_arr[:, 1], 0.0, 1.0)
-
-            # Compute errors vectorized
-            mae_lats = np.abs(pred_latencies - actual_latencies)
-            se_lats = (pred_latencies - actual_latencies) ** 2
-            mae_pdrs_arr = np.abs(pred_pdrs - actual_pdrs)
-            se_pdrs_arr = (pred_pdrs - actual_pdrs) ** 2
-
-            for j in range(len(x_new)):
-                log_entries.append(
-                    f"{lat_lons[j, 0]},{lat_lons[j, 1]},"
-                    f"{pred_latencies[j]},{actual_latencies[j]},{mae_lats[j]},{se_lats[j]},"
-                    f"{pred_pdrs[j]},{actual_pdrs[j]},{mae_pdrs_arr[j]},{se_pdrs_arr[j]}")
+            log_entries.extend(_process_batch(model, x_new, y_new, gps_scaler, latency_scaler))
 
             # Prepare targets for multi-output model training
             y_new_dict = {
@@ -295,6 +313,16 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
                 for entry in log_entries:
                     f.write(entry + "\n")
             log_entries = []
+
+    # Process remaining tail samples that didn't reach N
+    if len(x_new) > 0:
+        log_entries.extend(_process_batch(model, x_new, y_new, gps_scaler, latency_scaler))
+
+        # Flush remaining log entries
+        with open(log_file, "a") as f:
+            for entry in log_entries:
+                f.write(entry + "\n")
+        log_entries = []
 
     # Save final retrained model with timestamp
     save_path = os.path.join(MODEL_DIR, f"retrained_{model_type}_{rat}_{int(time.time())}.keras")

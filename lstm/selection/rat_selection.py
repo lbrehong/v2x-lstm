@@ -177,15 +177,14 @@ def select_best_rat(row, model_type):
     else:
         # Select lowest latency
         valid_options.sort(key=lambda x: x[1])
+        best_latency = valid_options[0][1]
         best_rat = valid_options[0][0]
 
-        # Handle latency tie-breaking
-        if len(valid_options) > 1:
-            if abs(valid_options[0][1] - valid_options[1][1]) < LATENCY_TIE_MARGIN_MS:
-                if "5g" in [valid_options[0][0], valid_options[1][0]]:
-                    best_rat = "5g"
-                elif "pc5" in [valid_options[0][0], valid_options[1][0]]:
-                    best_rat = "pc5"
+        # Gather all options within margin of the best, then apply priority
+        tied = [opt for opt in valid_options
+                if abs(opt[1] - best_latency) < LATENCY_TIE_MARGIN_MS]
+        priority = {"5g": 0, "pc5": 1, "dsrc": 2}
+        best_rat = min(tied, key=lambda opt: priority.get(opt[0], 99))[0]
 
     return best_rat
 
@@ -505,9 +504,9 @@ def make_rmse_table(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR):
             # MAE: mean of absolute errors
             latency_mae, ci_latency_mae = mean_ci(df["mae_latency"])
             pdr_mae, ci_pdr_mae = mean_ci(df["mae_pdr"])
-            # RMSE: sqrt of mean squared errors
-            latency_rmse = np.sqrt(df["squared_error_latency"].mean())
-            pdr_rmse = np.sqrt(df["squared_error_pdr"].mean())
+            # RMSE: mean of per-batch RMSE values
+            latency_rmse = df["rmse_latency"].mean()
+            pdr_rmse = df["rmse_pdr"].mean()
 
             scheme_data.append((
                 f"MAE: {latency_mae:.3f}±{ci_latency_mae:.3f} | RMSE: {latency_rmse:.3f}",

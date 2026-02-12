@@ -27,9 +27,9 @@ import numpy as np
 from config import MIN_LAT, MIN_LON
 from utils import find_files_with_string
 
-# Drift compensation parameters (calibrated per dataset)
+# Drift compensation parameters (calibrated for Dataset 05, used as fallback)
 # XMIN, XMAX: latency range for scaling; TH: threshold for drift calculation
-XMIN, XMAX, TH = 1.862, 1.921, -1.6  # Calibrated for Dataset 05
+XMIN, XMAX, TH = 1.862, 1.921, -1.6
 
 
 def calculate_coefficient(latencies, tx_seq_nums):
@@ -91,7 +91,46 @@ def scale_values(data, xmin=XMIN, xmax=XMAX, a=16.0, b=45.0):
     return a + (data - xmin) * (b - a) / (xmax - xmin)
 
 
-def trim_sa(file_list, output_file, path):
+def auto_detect_calibration(file_path):
+    """
+    Auto-detect drift calibration constants from a raw 5G log file.
+
+    Uses all negative latencies (threshold=0) for drift regression, then
+    computes P5/P95 of compensated values as the scaling range.
+
+    Args:
+        file_path: Path to raw 5G log file
+
+    Returns:
+        Tuple of (th, xmin, xmax) where th=0.0 and xmin/xmax are the
+        5th/95th percentiles of drift-compensated latencies.
+    """
+    latencies = []
+    tx_seq_nums = []
+    with open(file_path, 'r') as f:
+        for line in f:
+            if not line[0].isdigit():
+                continue
+            parts = line.strip().split(',')
+            latency = float(parts[4].strip())
+            if latency < 0:
+                latencies.append(latency)
+                tx_seq_nums.append(int(parts[0].strip()))
+
+    if not latencies:
+        raise ValueError(f"No negative latencies found in {file_path}")
+
+    coefficient = calculate_coefficient(latencies, tx_seq_nums)
+    compensated = [compensate_drift(lat, seq, coefficient)
+                   for lat, seq in zip(latencies, tx_seq_nums)]
+
+    xmin = float(np.percentile(compensated, 5))
+    xmax = float(np.percentile(compensated, 95))
+    print(f"Auto-detected calibration: th=0.0, xmin={xmin:.4f}, xmax={xmax:.4f}")
+    return 0.0, xmin, xmax
+
+
+def trim_sa(file_list, output_file, path, th=None, xmin=None, xmax=None):
     """
     Process 5G Standalone (SA) log files with drift compensation.
 
@@ -105,18 +144,26 @@ def trim_sa(file_list, output_file, path):
         file_list: List of 5G log filenames to process
         output_file: Path for output trimmed CSV
         path: Directory containing input files
+        th: Threshold for drift calculation (auto-detected if None)
+        xmin: Min of scaling source range (auto-detected if None)
+        xmax: Max of scaling source range (auto-detected if None)
 
     Returns:
         Dictionary mapping timestamps to (latitude, longitude) tuples
     """
     input_file = os.path.join(path, file_list[0])
+
+    # Auto-detect calibration if not provided
+    if th is None or xmin is None or xmax is None:
+        th, xmin, xmax = auto_detect_calibration(input_file)
+
     out = 0
     sa_data = {}
     latencies = []
     tx_seq_nums = []
     saved_sinr = 0
     saved_rsrp = 0
-    threshold = TH
+    threshold = th
 
     with open(input_file, 'r') as infile:
         for line in infile:
@@ -149,7 +196,7 @@ def trim_sa(file_list, output_file, path):
             latitude = parts[2].strip()
             longitude = parts[3].strip()
             latency_raw = parts[4].strip()
-            latency = scale_values(compensate_drift(float(latency_raw), int(tx_seq_num), coefficient))
+            latency = scale_values(compensate_drift(float(latency_raw), int(tx_seq_num), coefficient), xmin=xmin, xmax=xmax)
 
             if parts[5].strip().startswith("N"):
                 sinr = saved_sinr
@@ -162,7 +209,7 @@ def trim_sa(file_list, output_file, path):
 
             sa_data[int(float(timestamp)) * 1000] = (latitude, longitude)
 
-            outfile.write(f"{tx_seq_num},{timestamp},{latitude},{longitude},{latency},{sinr},{rsrp},0\n")
+            outfile.write(f"{tx_seq_num},{timestamp},{latitude},{longitude},{latency},{sinr},{rsrp}\n")
             out += 1
 
     return sa_data
@@ -241,7 +288,7 @@ def trim_dsrc(input_file, output_file, pc5_data, sa_data):
             timestamp = str(float(parts[9]) * 1000.0)
             power_ant1 = parts[5]
             power_ant2 = parts[6]
-            latency = parts[10]
+            latency = str(float(parts[10]) / 1000.0)  # Convert μs → ms
 
             if power_ant1.startswith("1"):
                 power_ant1 = "-102.0"
@@ -309,6 +356,9 @@ def append_files(output_file, files):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Trim and combine V2X data")
     parser.add_argument('--folder', type=str, required=True, help="Path to the folder containing the log files")
+    parser.add_argument('--th', type=float, default=None, help="Drift threshold (auto-detect if omitted)")
+    parser.add_argument('--xmin', type=float, default=None, help="Min scaling range (auto-detect if omitted)")
+    parser.add_argument('--xmax', type=float, default=None, help="Max scaling range (auto-detect if omitted)")
     args = parser.parse_args()
 
     PATH = args.folder
@@ -320,7 +370,8 @@ if __name__ == "__main__":
     print("Matching PC5 files: ", files_pc5)
     print("Matching 5G files: ", files_5g)
 
-    sa_data = trim_sa(files_5g, os.path.join(PATH, "trim_5g.csv"), PATH)
+    sa_data = trim_sa(files_5g, os.path.join(PATH, "trim_5g.csv"), PATH,
+                      th=args.th, xmin=args.xmin, xmax=args.xmax)
 
     combined_out_pc5 = 0
     combined_out_dsrc = 0
@@ -352,8 +403,12 @@ if __name__ == "__main__":
 
     trimmed_files_pc5.sort(key=get_first_timestamp)
     append_files(os.path.join(PATH, "trim_pc5.csv"), trimmed_files_pc5)
-    print(f"Combined trimmed PC5 files into combined_trimmed_pc5.csv. Total lines: {combined_out_pc5}")
+    print(f"Combined trimmed PC5 files into trim_pc5.csv. Total lines: {combined_out_pc5}")
 
     trimmed_files_dsrc.sort(key=get_first_timestamp)
     append_files(os.path.join(PATH, "trim_dsrc.csv"), trimmed_files_dsrc)
-    print(f"Combined trimmed DSRC files into combined_trimmed_dsrc.csv. Total lines: {combined_out_dsrc}")
+    print(f"Combined trimmed DSRC files into trim_dsrc.csv. Total lines: {combined_out_dsrc}")
+
+    # Clean up intermediate per-RSU trimmed files
+    for f in trimmed_files_pc5 + trimmed_files_dsrc:
+        os.remove(f)

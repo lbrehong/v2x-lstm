@@ -23,6 +23,7 @@ from api_types import (
 )
 from selection.api import RATSelectionAPI
 from config import OUTPUT_DIR
+from utils import safe_float as _safe_float, row_to_network_state as _row_to_network_state
 
 
 # =============================================================================
@@ -104,63 +105,6 @@ def process_batch(
     print(f"RAT decisions saved to {output_csv}")
 
     return result_df
-
-
-def _row_to_network_state(row: pd.Series) -> NetworkState:
-    """
-    Convert DataFrame row to NetworkState.
-
-    Handles various column naming conventions from different data sources.
-    """
-    # Try different timestamp column names
-    timestamp = 0
-    for col in ["timestamp_ms", "timestamp", "time_ms"]:
-        if col in row and pd.notna(row[col]):
-            timestamp = int(row[col])
-            break
-
-    # GPS coordinates
-    lat = row.get("tx_latitude", row.get("latitude", 0.0))
-    lon = row.get("tx_longitude", row.get("longitude", 0.0))
-
-    return NetworkState(
-        timestamp_ms=timestamp,
-        latitude=float(lat),
-        longitude=float(lon),
-        # DSRC measurements
-        dsrc_latency_ms=_safe_float(row.get("latency_ms_dsrc", row.get("dsrc_latency_ms"))),
-        dsrc_pdr=_safe_float(row.get("pdr_dsrc", row.get("dsrc_pdr"))),
-        dsrc_rsrp_1=_safe_float(row.get("rsrp_1", row.get("dsrc_rsrp_1"))),
-        dsrc_rsrp_2=_safe_float(row.get("rsrp_2", row.get("dsrc_rsrp_2"))),
-        # PC5 measurements
-        pc5_latency_ms=_safe_float(row.get("latency_ms_pc5", row.get("pc5_latency_ms"))),
-        pc5_pdr=_safe_float(row.get("pdr_pc5", row.get("pc5_pdr"))),
-        # 5G measurements
-        fiveg_latency_ms=_safe_float(row.get("latency_ms_5g", row.get("fiveg_latency_ms", row.get("latency_ms")))),
-        fiveg_pdr=_safe_float(row.get("pdr_5g", row.get("fiveg_pdr", row.get("pdr")))),
-        fiveg_sinr=_safe_float(row.get("sinr", row.get("fiveg_sinr"))),
-        fiveg_rsrp=_safe_float(row.get("rsrp", row.get("fiveg_rsrp"))),
-    )
-
-
-def _safe_float(value: any) -> Optional[float]:
-    """
-    Safely convert value to float, returning None for invalid values.
-
-    Args:
-        value: Value to convert (can be int, float, str, None, NaN)
-
-    Returns:
-        Float value, or None if conversion fails or value is None/NaN
-    """
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-        return float(value)
-    except (ValueError, TypeError):
-        return None
 
 
 # =============================================================================

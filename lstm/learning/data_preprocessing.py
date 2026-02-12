@@ -150,7 +150,7 @@ def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
     gps_scaler = scalers['tx_latitude']
 
     # Select only the columns needed for this RAT and remove incomplete rows
-    df = df[feature_cols].dropna()
+    df = df[feature_cols].dropna().copy()
 
     # Filter out rows with default/invalid GPS coordinates
     df = df[~((df['tx_latitude'] == MIN_LAT) & (df['tx_longitude'] == MIN_LON))]
@@ -204,7 +204,8 @@ def inverse_transform(scalers, csv):
     """
     log_df = pd.read_csv(csv, header=None,
                          names=["latitude", "longitude", "pred_latency", "actual_latency",
-                                "rmse_latency", "pred_pdr", "actual_pdr", "rmse_pdr"])
+                                "mae_latency", "rmse_latency",
+                                "pred_pdr", "actual_pdr", "mae_pdr", "rmse_pdr"])
 
     # Inverse transform GPS coordinates
     log_df[['latitude', 'longitude']] = scalers['tx_latitude'].inverse_transform(
@@ -217,5 +218,7 @@ def inverse_transform(scalers, csv):
     # Inverse transform PDR values
     log_df['pred_pdr'] = scalers['pdr'].inverse_transform(log_df['pred_pdr'])
     log_df['actual_pdr'] = scalers['pdr'].inverse_transform(log_df['actual_pdr'])
+
+    # MAE and RMSE columns are already in original units — leave as-is
 
     log_df.to_csv(csv + "_scaled", index=False)

@@ -376,17 +376,14 @@ class RATSelectionAPI:
         else:
             # Select lowest latency
             valid_options.sort(key=lambda x: x[1])
+            best_latency = valid_options[0][1]
             selected_rat = valid_options[0][0]
 
-            # Tie-breaking within latency margin
-            if len(valid_options) > 1:
-                if abs(valid_options[0][1] - valid_options[1][1]) < self.latency_margin:
-                    # Prefer 5G > PC5 > DSRC
-                    tied = [valid_options[0], valid_options[1]]
-                    if any(opt[0] == RATType.FiveG for opt in tied):
-                        selected_rat = RATType.FiveG
-                    elif any(opt[0] == RATType.PC5 for opt in tied):
-                        selected_rat = RATType.PC5
+            # Gather all options within margin of the best, then apply priority
+            tied = [opt for opt in valid_options
+                    if abs(opt[1] - best_latency) < self.latency_margin]
+            priority = {RATType.FiveG: 0, RATType.PC5: 1, RATType.DSRC: 2}
+            selected_rat = min(tied, key=lambda opt: priority.get(opt[0], 99))[0]
 
         # Get predictions for selected RAT
         if selected_rat in all_predictions:

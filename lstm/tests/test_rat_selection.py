@@ -94,9 +94,45 @@ class TestSelectBestRat:
 
         result = select_best_rat(row, 'lstm')
 
-        # Note: Current implementation may select DSRC as it has lowest latency
-        # and then check tie-breaking. Check the actual behavior.
-        assert result in ['dsrc', '5g', 'pc5']
+        assert result == '5g', "Should prefer 5G when all 3 RATs are within tie margin"
+
+    def test_tie_breaking_3way_prefers_5g(self):
+        """When all 3 RATs are within margin, should prefer 5G over PC5 and DSRC."""
+        from selection.rat_selection import select_best_rat
+
+        row = pd.Series({
+            'pred_latency_ms_dsrc_lstm': 10.0,
+            'pred_pdr_dsrc_lstm': 0.995,
+            'pdr_dsrc': 0.99,
+            'pred_latency_ms_pc5_lstm': 10.3,
+            'pred_pdr_pc5_lstm': 0.995,
+            'pdr_pc5': 0.99,
+            'pred_latency_ms_5g_lstm': 10.6,
+            'pred_pdr_5g_lstm': 0.995,
+            'pdr_5g': 0.99,
+        })
+
+        result = select_best_rat(row, 'lstm')
+        assert result == '5g'
+
+    def test_tie_breaking_prefers_pc5_over_dsrc(self):
+        """When only PC5 and DSRC are tied, should prefer PC5."""
+        from selection.rat_selection import select_best_rat
+
+        row = pd.Series({
+            'pred_latency_ms_dsrc_lstm': 10.0,
+            'pred_pdr_dsrc_lstm': 0.995,
+            'pdr_dsrc': 0.99,
+            'pred_latency_ms_pc5_lstm': 10.5,  # Within 1ms of DSRC
+            'pred_pdr_pc5_lstm': 0.995,
+            'pdr_pc5': 0.99,
+            'pred_latency_ms_5g_lstm': 20.0,  # Far away — not tied
+            'pred_pdr_5g_lstm': 0.995,
+            'pdr_5g': 0.99,
+        })
+
+        result = select_best_rat(row, 'lstm')
+        assert result == 'pc5'
 
     def test_nan_when_all_unavailable(self):
         """Should return NaN when all RATs have PDR below availability threshold."""

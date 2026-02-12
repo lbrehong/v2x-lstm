@@ -279,7 +279,6 @@ def main():
         new_file = new_files[0]
 
     # Determine model loading strategy
-    part_lstm = part_gru = part_rnn = None
     if args.load == "none":
         MODEL_PATH = None
         LOAD = False
@@ -287,11 +286,9 @@ def main():
         MODEL_PATH = os.path.join(MODEL_DIR, os.path.basename(args.load))
         LOAD = True
     else:
-        part_lstm = get_latest_model("lstm", RAT)
-        part_gru = get_latest_model("gru", RAT)
-        part_rnn = get_latest_model("rnn", RAT)
-        if part_lstm and part_gru and part_rnn:
-            MODEL_PATH = part_lstm
+        existing = get_latest_model(MODEL_TYPE, RAT)
+        if existing:
+            MODEL_PATH = existing
             LOAD = True
         else:
             MODEL_PATH = None
@@ -314,62 +311,42 @@ def main():
         "pdr": y_train[:, 1]
     }
 
-    # Load existing models or train new ones from scratch
+    # Load existing model or train new one from scratch
     if LOAD and os.path.exists(MODEL_PATH):
         # Validate model type matches file
         if MODEL_TYPE not in MODEL_PATH:
             raise ValueError(f"Model file '{MODEL_PATH}' does not match type '{MODEL_TYPE}'")
 
-        # Load all three model architectures and their training histories
-        print(f"Loading existing models for {RAT}...")
-        model_lstm = load_model(part_lstm, custom_objects={'rmse': rmse})
-        model_gru = load_model(part_gru, custom_objects={'rmse': rmse})
-        model_rnn = load_model(part_rnn, custom_objects={'rmse': rmse})
+        # Load existing model and training history
+        print(f"Loading existing {MODEL_TYPE} model for {RAT}...")
+        model_path = get_latest_model(MODEL_TYPE, RAT)
+        model = load_model(model_path, custom_objects={'rmse': rmse})
 
-        # Load training history for potential analysis
-        with open(os.path.join(OUTPUT_DIR, f"lstm_{RAT}_training_history.json"), "r") as f:
-            history_lstm = json.load(f)
-        with open(os.path.join(OUTPUT_DIR, f"gru_{RAT}_training_history.json"), "r") as f:
-            history_gru = json.load(f)
-        with open(os.path.join(OUTPUT_DIR, f"rnn_{RAT}_training_history.json"), "r") as f:
-            history_rnn = json.load(f)
+        with open(os.path.join(OUTPUT_DIR, f"{MODEL_TYPE}_{RAT}_training_history.json"), "r") as f:
+            history = json.load(f)
 
-        if model_lstm and history_lstm:
-            print(f"LSTM model loaded: {part_lstm}")
-        if model_gru and history_gru:
-            print(f"GRU model loaded: {part_gru}")
-        if model_rnn and history_rnn:
-            print(f"RNN model loaded: {part_rnn}")
+        print(f"{MODEL_TYPE.upper()} model loaded: {model_path}")
     else:
-        # Build and train new models from scratch
+        # Build and train new model from scratch
         if not LOAD:
-            print("No model specified, building new models...")
+            print(f"No model specified, building new {MODEL_TYPE} model...")
         elif not os.path.exists(MODEL_PATH):
-            print("No existing model found, building new models...")
+            print(f"No existing model found, building new {MODEL_TYPE} model...")
 
-        model_lstm, history_lstm = train_single_model(
-            "lstm", TIMESTEPS, FEATURES, X_train, y_train_dict, RAT, epochs)
-        model_gru, history_gru = train_single_model(
-            "gru", TIMESTEPS, FEATURES, X_train, y_train_dict, RAT, epochs)
-        model_rnn, history_rnn = train_single_model(
-            "rnn", TIMESTEPS, FEATURES, X_train, y_train_dict, RAT, epochs)
+        model, history = train_single_model(
+            MODEL_TYPE, TIMESTEPS, FEATURES, X_train, y_train_dict, RAT, epochs)
 
         # Persist training history as JSON for later analysis
-        for mtype, history in [("lstm", history_lstm), ("gru", history_gru), ("rnn", history_rnn)]:
-            with open(os.path.join(OUTPUT_DIR, f"{mtype}_{RAT}_training_history.json"), "w") as f:
-                json.dump(history.history, f)
+        with open(os.path.join(OUTPUT_DIR, f"{MODEL_TYPE}_{RAT}_training_history.json"), "w") as f:
+            json.dump(history.history, f)
 
-    # Incremental learning: retrain models with new data in streaming fashion
+    # Incremental learning: retrain model with new data in streaming fashion
     if X_new_data is not None:
         print("=" * 60)
-        print("Starting automatic incremental retraining...")
+        print(f"Starting automatic incremental retraining for {MODEL_TYPE}...")
         print("=" * 60)
-        automatic_train(model_lstm, X_new_data, y_new_data, 32, 500, 0.15,
-                        os.path.join(OUTPUT_DIR, f"prediction_log_lstm_{RAT}.csv"), RAT, "lstm")
-        automatic_train(model_gru, X_new_data, y_new_data, 32, 500, 0.15,
-                        os.path.join(OUTPUT_DIR, f"prediction_log_gru_{RAT}.csv"), RAT, "gru")
-        automatic_train(model_rnn, X_new_data, y_new_data, 32, 500, 0.15,
-                        os.path.join(OUTPUT_DIR, f"prediction_log_rnn_{RAT}.csv"), RAT, "rnn")
+        automatic_train(model, X_new_data, y_new_data, 32, 500, 0.15,
+                        os.path.join(OUTPUT_DIR, f"prediction_log_{MODEL_TYPE}_{RAT}.csv"), RAT, MODEL_TYPE)
     else:
         print("No new data provided. Skipping incremental retraining.")
 

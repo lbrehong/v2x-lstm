@@ -43,6 +43,7 @@ from api_types import (
     PacketSizeDecision, TransmissionOutcome,
 )
 from config import OUTPUT_DIR, TX_INTERVAL_MS
+from utils import row_to_network_state
 
 # Import from sub-modules
 from queuesim.phy_layer import (
@@ -392,31 +393,14 @@ class IntegratedQueueSimulator:
         row = self.network_data.iloc[self.data_index]
         self.data_index += 1
 
-        # Convert row to NetworkState
         try:
-            return NetworkState(
+            return row_to_network_state(
+                row,
+                default_lat=43.56,
+                default_lon=1.47,
                 timestamp_ms=int(timestamp * 1000),
-                latitude=float(row.get("latitude", row.get("tx_latitude", 43.56))),
-                longitude=float(row.get("longitude", row.get("tx_longitude", 1.47))),
-                dsrc_latency_ms=self._safe_float(row.get("dsrc_latency_ms", row.get("latency_ms_dsrc"))),
-                dsrc_pdr=self._safe_float(row.get("dsrc_pdr", row.get("pdr_dsrc"))),
-                pc5_latency_ms=self._safe_float(row.get("pc5_latency_ms", row.get("latency_ms_pc5"))),
-                pc5_pdr=self._safe_float(row.get("pc5_pdr", row.get("pdr_pc5"))),
-                fiveg_latency_ms=self._safe_float(row.get("fiveg_latency_ms", row.get("latency_ms_5g", row.get("latency_ms")))),
-                fiveg_pdr=self._safe_float(row.get("fiveg_pdr", row.get("pdr_5g", row.get("pdr")))),
-                fiveg_sinr=self._safe_float(row.get("fiveg_sinr", row.get("sinr"))),
-                fiveg_rsrp=self._safe_float(row.get("fiveg_rsrp", row.get("rsrp"))),
             )
         except (KeyError, ValueError):
-            return None
-
-    def _safe_float(self, value) -> Optional[float]:
-        """Safely convert to float."""
-        if value is None or pd.isna(value):
-            return None
-        try:
-            return float(value)
-        except (ValueError, TypeError):
             return None
 
     def _get_rat_decision(self, state: NetworkState) -> RATDecision:

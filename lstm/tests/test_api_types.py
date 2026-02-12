@@ -17,8 +17,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api_types import (
     RATType, NetworkState, QueueContext, RATDecision,
-    PacketSizeDecision, TransmissionOutcome,
+    PacketSizeDecision, TransmissionOutcome, _parse_bool,
 )
+
+
+class TestParseBool:
+    """Tests for _parse_bool helper function."""
+
+    def test_parse_bool_true_values(self):
+        """_parse_bool should return True for truthy inputs."""
+        assert _parse_bool(True) is True
+        assert _parse_bool("True") is True
+        assert _parse_bool("true") is True
+        assert _parse_bool("TRUE") is True
+        assert _parse_bool("1") is True
+        assert _parse_bool(1) is True
+
+    def test_parse_bool_false_values(self):
+        """_parse_bool should return False for falsy inputs."""
+        assert _parse_bool(False) is False
+        assert _parse_bool("False") is False
+        assert _parse_bool("false") is False
+        assert _parse_bool("FALSE") is False
+        assert _parse_bool("0") is False
+        assert _parse_bool(0) is False
+
+    def test_parse_bool_empty_string(self):
+        """_parse_bool should return False for empty string."""
+        assert _parse_bool("") is False
 
 
 class TestRATType:
@@ -529,3 +555,55 @@ class TestTransmissionOutcome:
 
         restored = TransmissionOutcome.from_dict(d)
         assert restored.delivered is False
+
+    def test_outcome_from_dict_string_false(self, sample_network_state):
+        """from_dict with string 'False' should set delivered=False (not True)."""
+        outcome = TransmissionOutcome(
+            timestamp_ms=1699999999200,
+            rat_used=RATType.DSRC,
+            packet_size_bytes=1500,
+            actual_latency_ms=500.0,
+            delivered=False,
+            network_state=sample_network_state,
+        )
+        d = outcome.to_dict()
+        d["delivered"] = "False"  # Simulate CSV string deserialization
+
+        restored = TransmissionOutcome.from_dict(d)
+        assert restored.delivered is False
+
+    def test_outcome_from_dict_string_true(self, sample_network_state):
+        """from_dict with string 'True' should set delivered=True."""
+        outcome = TransmissionOutcome(
+            timestamp_ms=1699999999100,
+            rat_used=RATType.PC5,
+            packet_size_bytes=800,
+            actual_latency_ms=11.5,
+            delivered=True,
+            network_state=sample_network_state,
+        )
+        d = outcome.to_dict()
+        d["delivered"] = "True"  # Simulate CSV string
+
+        restored = TransmissionOutcome.from_dict(d)
+        assert restored.delivered is True
+
+    def test_outcome_from_dict_string_zero_one(self, sample_network_state):
+        """from_dict with string '0'/'1' should parse correctly."""
+        outcome = TransmissionOutcome(
+            timestamp_ms=1699999999100,
+            rat_used=RATType.PC5,
+            packet_size_bytes=800,
+            actual_latency_ms=11.5,
+            delivered=True,
+            network_state=sample_network_state,
+        )
+        d = outcome.to_dict()
+
+        d["delivered"] = "0"
+        restored = TransmissionOutcome.from_dict(d)
+        assert restored.delivered is False
+
+        d["delivered"] = "1"
+        restored = TransmissionOutcome.from_dict(d)
+        assert restored.delivered is True
