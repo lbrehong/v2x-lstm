@@ -36,7 +36,18 @@ TRAIN_RATIO = 0.4
 # =============================================================================
 # Data Collection Parameters
 # =============================================================================
-TX_INTERVAL_MS = 100  # in ms, 10 packets per second
+TX_INTERVAL_MS = {
+    "5g": 2000,   # 5G SA ping interval (0.5 Hz, measured from df_ping.json)
+    "pc5": 100,   # C-V2X PC5 CAM rate (10 Hz)
+    "dsrc": 100,  # DSRC BSM rate (10 Hz)
+}
+DEFAULT_TX_INTERVAL_MS = 100  # Fallback for unspecified RATs
+
+
+def get_tx_interval_ms(rat) -> int:
+    """Get TX interval in ms for a RAT (string key or RATType enum)."""
+    key = rat.value if hasattr(rat, "value") else str(rat)
+    return TX_INTERVAL_MS.get(key, DEFAULT_TX_INTERVAL_MS)
 PDR_WINDOW = 10  # in seconds
 
 # =============================================================================

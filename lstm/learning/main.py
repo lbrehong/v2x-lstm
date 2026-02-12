@@ -36,7 +36,7 @@ from keras.models import load_model
 
 from config import (
     TIMESTEPS, EPOCHS, BATCH_SIZE, VALIDATION_SPLIT,
-    TX_INTERVAL_MS, PDR_WINDOW, TARGET_COLS, MODEL_DIR, OUTPUT_DIR,
+    get_tx_interval_ms, PDR_WINDOW, TARGET_COLS, MODEL_DIR, OUTPUT_DIR,
     FEATURES_COUNT,
 )
 from utils import find_files_with_string, get_latest_model, ensure_dir_exists
@@ -255,8 +255,7 @@ def main():
     MODEL_TYPE = args.model
     DATA_NPZ = args.npz
     epochs = args.epochs if args.epochs else EPOCHS
-    # 5G uses different TX interval (46ms) compared to PC5/DSRC (20ms)
-    tx_interval = 46 if RAT == "5g" else TX_INTERVAL_MS
+    tx_interval = get_tx_interval_ms(RAT)
 
     # Validate input path
     if PATH and not os.path.exists(PATH):

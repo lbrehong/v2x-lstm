@@ -22,12 +22,12 @@ import pandas as pd
 import numpy as np
 import argparse
 
-from config import TX_INTERVAL_MS, PDR_WINDOW
+from config import get_tx_interval_ms, PDR_WINDOW
 from learning.data_preprocessing import compute_pdr_rolling
 
 # Default input file configuration
-PRIMARY = "5g.csv"  # Reference RAT for GPS coordinates
-CSV = ["dsrc.csv", "pc5.csv"]  # Secondary RATs to match
+PRIMARY = "trim_5g.csv"  # Reference RAT for GPS coordinates
+CSV = ["trim_dsrc.csv", "trim_pc5.csv"]  # Secondary RATs to match
 
 # GPS matching tolerance (approximately 1 meter at mid-latitudes)
 TOLERANCE = 0.00001
@@ -69,7 +69,7 @@ def match_data(input_dir, primary=None, secondary=None):
 
     # Load primary CSV
     primary_df = pd.read_csv(os.path.join(input_dir, primary))
-    compute_pdr_rolling(primary_df, "tx_timestamp_ms", PDR_WINDOW, 46)
+    compute_pdr_rolling(primary_df, "tx_timestamp_ms", PDR_WINDOW, get_tx_interval_ms("5g"))
 
     # Remove duplicates while keeping the lowest latency but preserving the original order
     primary_df = primary_df[primary_df["latency_ms"] > 15.999]  # Remove outliers
@@ -96,7 +96,8 @@ def match_data(input_dir, primary=None, secondary=None):
         print("___________________")
         print("Processing", csvs)
         secondary_df = pd.read_csv(os.path.join(input_dir, csvs))
-        compute_pdr_rolling(secondary_df, "tx_timestamp_ms", PDR_WINDOW, TX_INTERVAL_MS)
+        rat_key = _output_name(csvs).replace(".csv", "")  # e.g. "dsrc", "pc5"
+        compute_pdr_rolling(secondary_df, "tx_timestamp_ms", PDR_WINDOW, get_tx_interval_ms(rat_key))
         secondary_df = secondary_df[secondary_df["latency_ms"] < 300.001]
 
         matched_rows = []
@@ -158,7 +159,7 @@ def match_data(input_dir, primary=None, secondary=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Match cross-RAT data by GPS coordinates")
     parser.add_argument('--input', type=str, required=True, help="Path to the input directory")
-    parser.add_argument('--primary', type=str, default=None, help="Primary CSV filename (default: 5g.csv)")
+    parser.add_argument('--primary', type=str, default=None, help="Primary CSV filename (default: trim_5g.csv)")
     parser.add_argument('--secondary', type=str, nargs='+', default=None, help="Secondary CSV filenames (default: dsrc.csv pc5.csv)")
     args = parser.parse_args()
 

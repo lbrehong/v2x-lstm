@@ -574,14 +574,34 @@ if __name__ == "__main__":
     MODE = args.mode
 
     if not MODE and MODEL_TYPE:
-        if MODEL_TYPE != "all":
-            process_file(INPUT, MODEL_TYPE, os.path.join(os.path.dirname(INPUT), "selection_results.csv"), INPUT)
-        else:
+        if os.path.isdir(INPUT):
+            # Directory mode: process matched_*.csv files
+            model_types = MODELS if MODEL_TYPE == "all" else [MODEL_TYPE]
+
             print("__________________________________")
             print("____________ LET'S GO ____________")
             print("__________________________________")
-            print("_ Processing all input CSVs and getting predictions from each model")
-            process_all(INPUT)
+            print(f"_ Processing all input CSVs with model type(s): {model_types}")
+
+            # Generate predictions for each RAT × model_type
+            for rat in RATS:
+                matched_csv = os.path.join(INPUT, f"matched_{rat}.csv")
+                if not os.path.exists(matched_csv):
+                    print(f"  Warning: {matched_csv} not found, skipping {rat}")
+                    continue
+                dfl = pd.read_csv(matched_csv)
+                (X_new, y_new, scalers) = preprocess_lstm_input(dfl, new=True, rat=rat,
+                                                                 target_cols=TARGET_COLS, seq_length=TIMESTEPS)
+                for mt in model_types:
+                    model_path = get_latest_model(mt, rat)
+                    if model_path is None:
+                        print(f"  Warning: no {mt} model found for {rat}, skipping")
+                        continue
+                    model_f = load_model(model_path, custom_objects={'rmse': rmse})
+                    automatic_train(model_f, X_new, y_new, 32, 200, 0.15,
+                                    os.path.join(OUTPUT_DIR, f"final_log_{mt}_{rat}.csv"), rat, mt)
+                    print(f"  {rat}: {mt} predictions done.")
+
             print("_ Processing done.")
             print("_ Merging into the super-CSV.")
             super_df = merge_csvs(INPUT)
@@ -589,15 +609,18 @@ if __name__ == "__main__":
             super_pred_df = add_predictions(super_df, INPUT)
             print("_ Merging done.")
             print("_ Sending to the selection algorithm.")
-            super_df["Best_RAT_lstm"] = super_pred_df.apply(select_best_rat, args=("lstm",), axis=1)
-            super_df["Best_RAT_gru"] = super_pred_df.apply(select_best_rat, args=("gru",), axis=1)
-            super_df["Best_RAT_rnn"] = super_pred_df.apply(select_best_rat, args=("rnn",), axis=1)
+            for mt in model_types:
+                super_df[f"Best_RAT_{mt}"] = super_pred_df.apply(select_best_rat, args=(mt,), axis=1)
             print("_ Adding opportunistic algorithm.")
             super_df = opportunistic_best_rat(super_df)
             print("_ Algorithms done.")
-            print(f"_ Saving. {os.path.join(INPUT, 'bestRAT_super.csv')}")
-            super_df.to_csv(os.path.join(INPUT, "bestRAT_super.csv"), index=False)
+            out_path = os.path.join(INPUT, "bestRAT_super.csv")
+            print(f"_ Saving. {out_path}")
+            super_df.to_csv(out_path, index=False)
             print("_ All done.")
+        else:
+            # Single CSV file mode
+            process_file(INPUT, MODEL_TYPE, os.path.join(os.path.dirname(INPUT), "selection_results.csv"), INPUT)
 
     elif MODE == "view":
         visualize_rat_map(INPUT, output_dir=os.path.dirname(INPUT) or OUTPUT_DIR)

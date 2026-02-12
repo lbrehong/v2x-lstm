@@ -42,7 +42,7 @@ from api_types import (
     RATType, NetworkState, QueueContext, RATDecision,
     PacketSizeDecision, TransmissionOutcome,
 )
-from config import OUTPUT_DIR, TX_INTERVAL_MS
+from config import OUTPUT_DIR, DEFAULT_TX_INTERVAL_MS, get_tx_interval_ms
 from utils import row_to_network_state
 
 # Import from sub-modules
@@ -183,7 +183,7 @@ class QueueSimulator:
             return True
 
         target_rat = rat or self.current_rat or RATType.FiveG
-        capacity_bytes = calculate_queue_capacity_bytes(target_rat, TX_INTERVAL_MS)
+        capacity_bytes = calculate_queue_capacity_bytes(target_rat, get_tx_interval_ms(target_rat))
         return (self.queue_bytes + packet_size) <= capacity_bytes
 
     def enqueue(self, packet_size: int) -> bool:
@@ -232,12 +232,14 @@ class QueueSimulator:
         """
         rat = rat_decision.selected_rat
 
+        send_rate = 1000 / get_tx_interval_ms(rat)
+
         if rat == RATType.UNAVAILABLE:
             return PacketSizeDecision(
                 packet_size_bytes=self.base_packet_size,
                 fragment_count=1,
                 priority_level=0,
-                send_rate_hz=1000 / TX_INTERVAL_MS,
+                send_rate_hz=send_rate,
             )
 
         # Get DTMC for this RAT
@@ -247,7 +249,7 @@ class QueueSimulator:
                 packet_size_bytes=self.base_packet_size,
                 fragment_count=1,
                 priority_level=0,
-                send_rate_hz=1000 / TX_INTERVAL_MS,
+                send_rate_hz=send_rate,
             )
 
         # Get PDR from moving window (actual outcomes), fallback to prediction
@@ -280,7 +282,7 @@ class QueueSimulator:
             packet_size_bytes=new_size,
             fragment_count=1,
             priority_level=priority,
-            send_rate_hz=1000 / TX_INTERVAL_MS,
+            send_rate_hz=send_rate,
         )
 
     def update_pdr_estimate(self, outcome: TransmissionOutcome) -> None:
@@ -334,7 +336,7 @@ class IntegratedQueueSimulator:
         self,
         rat_api=None,
         network_data: Optional[pd.DataFrame] = None,
-        arrival_rate_hz: float = 1000 / TX_INTERVAL_MS,
+        arrival_rate_hz: float = 1000 / DEFAULT_TX_INTERVAL_MS,
         base_packet_size: int = 1000,
         correction_exponent: float = 0.8,
         seed: Optional[int] = None,
@@ -719,7 +721,7 @@ class IntegratedQueueSimulator:
 def run_standalone(
     input_csv: str,
     output_csv: str,
-    arrival_rate_hz: float = 1000 / TX_INTERVAL_MS,
+    arrival_rate_hz: float = 1000 / DEFAULT_TX_INTERVAL_MS,
     base_packet_size: int = 1000,
     correction_exponent: float = 0.8,
     seed: Optional[int] = None,

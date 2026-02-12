@@ -9,7 +9,7 @@ All calculations are based on 3GPP/IEEE PHY-layer parameters defined in config.R
 from typing import Dict
 
 from api_types import RATType
-from config import RAT_PHY_CONFIG, TX_INTERVAL_MS
+from config import RAT_PHY_CONFIG, get_tx_interval_ms
 
 
 def get_phy_config(rat: RATType) -> Dict:
@@ -121,7 +121,7 @@ def can_transmit(packet_size: int, rat: RATType) -> bool:
     Returns:
         True if packet can be transmitted in one TX interval
     """
-    max_bytes = calculate_tx_capacity_bytes(rat, TX_INTERVAL_MS)
+    max_bytes = calculate_tx_capacity_bytes(rat, get_tx_interval_ms(rat))
     return packet_size <= max_bytes
 
 
@@ -138,7 +138,7 @@ def get_queue_capacity_packets(rat: RATType, packet_size: int) -> int:
     """
     if packet_size <= 0:
         return 100  # Default capacity
-    capacity_bytes = calculate_queue_capacity_bytes(rat, TX_INTERVAL_MS)
+    capacity_bytes = calculate_queue_capacity_bytes(rat, get_tx_interval_ms(rat))
     return max(1, capacity_bytes // packet_size)
 
 
@@ -152,7 +152,7 @@ def get_max_packet_size(rat: RATType) -> int:
     Returns:
         Maximum packet size in bytes
     """
-    return calculate_tx_capacity_bytes(rat, TX_INTERVAL_MS)
+    return calculate_tx_capacity_bytes(rat, get_tx_interval_ms(rat))
 
 
 def calculate_tx_time_ms(packet_size: int, rat: RATType) -> float:

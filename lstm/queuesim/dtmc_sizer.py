@@ -14,7 +14,7 @@ from config import (
     DTMC_PACKET_SIZES,
     DTMC_THRESHOLD_HIGH, DTMC_THRESHOLD_LOW,
     DTMC_WINDOW_SECONDS,
-    TX_INTERVAL_MS,
+    DEFAULT_TX_INTERVAL_MS,
 )
 
 
@@ -41,7 +41,7 @@ class DTMCPacketSizer:
         threshold_high: float = DTMC_THRESHOLD_HIGH,
         threshold_low: float = DTMC_THRESHOLD_LOW,
         window_seconds: float = DTMC_WINDOW_SECONDS,
-        tx_rate_hz: float = 1000 / TX_INTERVAL_MS,
+        tx_rate_hz: float = 1000 / DEFAULT_TX_INTERVAL_MS,
     ):
         """
         Initialize DTMC packet sizer.

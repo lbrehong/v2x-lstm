@@ -44,7 +44,7 @@ if SIMPY_AVAILABLE:
         calculate_tx_capacity_bytes,
         calculate_queue_capacity_bytes,
     )
-    from config import TX_INTERVAL_MS
+    from config import get_tx_interval_ms
 
 
 class TestPDRCorrection:
@@ -354,8 +354,9 @@ class TestIntegratedQueueSimulator:
     def test_initialization(self, sample_data):
         """Should initialize correctly."""
         sim = IntegratedQueueSimulator(network_data=sample_data)
-        # Default arrival rate is 1000/TX_INTERVAL_MS Hz
-        assert sim.arrival_rate_hz == 1000 / TX_INTERVAL_MS
+        # Default arrival rate is 1000/DEFAULT_TX_INTERVAL_MS Hz
+        from config import DEFAULT_TX_INTERVAL_MS
+        assert sim.arrival_rate_hz == 1000 / DEFAULT_TX_INTERVAL_MS
         assert sim.base_packet_size == 1000
 
     def test_run_returns_metrics(self, sample_data):
@@ -474,9 +475,9 @@ class TestPHYConfig:
 
     def test_capacity_ordering(self):
         """5G should have highest capacity, PC5 lowest (via RB formula)."""
-        tx_5g = calculate_tx_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
-        tx_dsrc = calculate_tx_capacity_bytes(RATType.DSRC, TX_INTERVAL_MS)
-        tx_pc5 = calculate_tx_capacity_bytes(RATType.PC5, TX_INTERVAL_MS)
+        tx_5g = calculate_tx_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
+        tx_dsrc = calculate_tx_capacity_bytes(RATType.DSRC, get_tx_interval_ms(RATType.DSRC))
+        tx_pc5 = calculate_tx_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
 
         assert tx_5g > tx_dsrc
         assert tx_dsrc > tx_pc5
@@ -509,21 +510,21 @@ class TestPHYHelperFunctions:
 
     def test_can_transmit_at_limit(self):
         """Should return True for packets at exact TX limit."""
-        max_5g = calculate_tx_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
+        max_5g = calculate_tx_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
         assert can_transmit(max_5g, RATType.FiveG)
 
     def test_can_transmit_over_limit(self):
         """Should return False for packets over TX limit."""
-        max_5g = calculate_tx_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
+        max_5g = calculate_tx_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
         assert not can_transmit(max_5g + 1, RATType.FiveG)
 
-        max_pc5 = calculate_tx_capacity_bytes(RATType.PC5, TX_INTERVAL_MS)
+        max_pc5 = calculate_tx_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
         assert not can_transmit(max_pc5 + 1, RATType.PC5)
 
     def test_get_queue_capacity_packets(self):
         """Should calculate queue capacity in packets."""
         # Queue capacity is based on RB formula
-        queue_bytes = calculate_queue_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
+        queue_bytes = calculate_queue_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
         capacity = get_queue_capacity_packets(RATType.FiveG, 1000)
         expected = queue_bytes // 1000
         assert capacity == expected
@@ -541,9 +542,9 @@ class TestPHYHelperFunctions:
 
     def test_get_max_packet_size(self):
         """Should return max packet size (TX capacity) for each RAT."""
-        assert get_max_packet_size(RATType.FiveG) == calculate_tx_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
-        assert get_max_packet_size(RATType.PC5) == calculate_tx_capacity_bytes(RATType.PC5, TX_INTERVAL_MS)
-        assert get_max_packet_size(RATType.DSRC) == calculate_tx_capacity_bytes(RATType.DSRC, TX_INTERVAL_MS)
+        assert get_max_packet_size(RATType.FiveG) == calculate_tx_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
+        assert get_max_packet_size(RATType.PC5) == calculate_tx_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
+        assert get_max_packet_size(RATType.DSRC) == calculate_tx_capacity_bytes(RATType.DSRC, get_tx_interval_ms(RATType.DSRC))
 
     def test_calculate_tx_time_positive(self):
         """TX time should always be positive."""
@@ -605,7 +606,7 @@ class TestQueueSimulatorPHY:
     def test_can_enqueue_at_capacity(self):
         """Should check capacity correctly using RB-based formula."""
         sim = QueueSimulator()
-        capacity = calculate_queue_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
+        capacity = calculate_queue_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
 
         # Fill queue to near capacity
         sim.queue_bytes = capacity - 1000
@@ -617,7 +618,7 @@ class TestQueueSimulatorPHY:
     def test_enqueue_drops_on_overflow(self):
         """Enqueue should return False and track dropped packets on overflow."""
         sim = QueueSimulator()
-        capacity = calculate_queue_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
+        capacity = calculate_queue_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
 
         # Fill queue to capacity
         sim.queue_bytes = capacity
@@ -658,7 +659,7 @@ class TestQueueSimulatorPHY:
         assert dtmc.current_size == 1024  # Initial size
 
         capacity = sim.get_queue_capacity()
-        queue_bytes = calculate_queue_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
+        queue_bytes = calculate_queue_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
         expected = queue_bytes // 1024
         assert capacity == expected
 
@@ -685,7 +686,7 @@ class TestQueueSimulatorPHY:
 
         # Should not exceed PC5 PHY max (calculated from RB formula)
         # Since 4096 < RB-calculated max, should return 4096
-        max_phy = calculate_tx_capacity_bytes(RATType.PC5, TX_INTERVAL_MS)
+        max_phy = calculate_tx_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
         assert packet_decision.packet_size_bytes <= max_phy
         assert packet_decision.packet_size_bytes == 4096  # DTMC max
 
@@ -875,8 +876,8 @@ class TestRBCapacityModel:
     def test_queue_capacity_is_multiple_of_tx(self):
         """Queue capacity should be a multiple of TX capacity."""
         for rat in [RATType.PC5, RATType.FiveG, RATType.DSRC]:
-            tx_capacity = calculate_tx_capacity_bytes(rat, TX_INTERVAL_MS)
-            queue_capacity = calculate_queue_capacity_bytes(rat, TX_INTERVAL_MS)
+            tx_capacity = calculate_tx_capacity_bytes(rat, get_tx_interval_ms(rat))
+            queue_capacity = calculate_queue_capacity_bytes(rat, get_tx_interval_ms(rat))
             config = get_phy_config(rat)
             multiplier = config.get("queue_multiplier", 2)
 
@@ -884,9 +885,9 @@ class TestRBCapacityModel:
 
     def test_capacity_ordering_matches_expectations(self):
         """5G should have highest capacity, PC5 lowest for same interval."""
-        tx_5g = calculate_tx_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
-        tx_dsrc = calculate_tx_capacity_bytes(RATType.DSRC, TX_INTERVAL_MS)
-        tx_pc5 = calculate_tx_capacity_bytes(RATType.PC5, TX_INTERVAL_MS)
+        tx_5g = calculate_tx_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
+        tx_dsrc = calculate_tx_capacity_bytes(RATType.DSRC, get_tx_interval_ms(RATType.DSRC))
+        tx_pc5 = calculate_tx_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
 
         assert tx_5g > tx_dsrc
         assert tx_dsrc > tx_pc5
@@ -895,13 +896,13 @@ class TestRBCapacityModel:
         """get_max_packet_size should use RB-based capacity."""
         for rat in [RATType.PC5, RATType.FiveG, RATType.DSRC]:
             max_size = get_max_packet_size(rat)
-            expected = calculate_tx_capacity_bytes(rat, TX_INTERVAL_MS)
+            expected = calculate_tx_capacity_bytes(rat, get_tx_interval_ms(rat))
             assert max_size == expected
 
     def test_can_transmit_uses_rb_formula(self):
         """can_transmit should use RB-based capacity."""
         # PC5: 21,000 bytes per 100ms
-        max_pc5 = calculate_tx_capacity_bytes(RATType.PC5, TX_INTERVAL_MS)
+        max_pc5 = calculate_tx_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
 
         assert can_transmit(max_pc5, RATType.PC5)
         assert not can_transmit(max_pc5 + 1, RATType.PC5)
@@ -909,7 +910,7 @@ class TestRBCapacityModel:
     def test_get_queue_capacity_packets_uses_rb_formula(self):
         """get_queue_capacity_packets should use RB-based queue capacity."""
         packet_size = 1000
-        queue_bytes = calculate_queue_capacity_bytes(RATType.FiveG, TX_INTERVAL_MS)
+        queue_bytes = calculate_queue_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
         expected_packets = queue_bytes // packet_size
 
         actual = get_queue_capacity_packets(RATType.FiveG, packet_size)
@@ -953,7 +954,7 @@ class TestRBCapacityIntegration:
         sim.current_rat = RATType.PC5
 
         # Get expected capacity from RB formula
-        expected_capacity = calculate_queue_capacity_bytes(RATType.PC5, TX_INTERVAL_MS)
+        expected_capacity = calculate_queue_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
 
         # Fill to near capacity
         sim.queue_bytes = expected_capacity - 100
@@ -987,7 +988,7 @@ class TestRBCapacityIntegration:
         packet_decision = sim.decide_packet_size(decision, current_time=1.0)
 
         # Should not exceed PHY max
-        max_phy = calculate_tx_capacity_bytes(RATType.PC5, TX_INTERVAL_MS)
+        max_phy = calculate_tx_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
         assert packet_decision.packet_size_bytes <= max_phy
 
     def test_tx_time_calculation_consistent(self):

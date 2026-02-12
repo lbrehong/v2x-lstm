@@ -1,0 +1,876 @@
+"""
+Closed-loop feedback simulation: RAT selection -> DTMC packet sizing ->
+simulated TX -> model retraining -> repeat.
+
+Processes a super_merged CSV (with all RAT measurements at matched GPS
+locations) through the full feedback loop, proving the architecture works
+end-to-end.
+
+Supports single-vehicle (default) and multi-vehicle platoon simulation
+with contention effects when multiple vehicles share the same RAT.
+
+Usage:
+    # Single vehicle (original)
+    python -m scripts.feedback_loop \
+        --input /path/to/super_merged.csv \
+        --model_type lstm \
+        --seed 42
+
+    # Multi-vehicle platoon (N=20)
+    python -m scripts.feedback_loop \
+        --input /path/to/super_merged.csv \
+        --model_type lstm \
+        --seed 42 \
+        --num_vehicles 20
+"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import argparse
+import random
+import time
+from collections import Counter
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+from api_types import RATType, NetworkState, TransmissionOutcome
+from config import (
+    TIMESTEPS, MODEL_DIR, OUTPUT_DIR,
+    create_latency_scaler,
+)
+from utils import row_to_network_state, ensure_dir_exists
+from selection.api import RATSelectionAPI
+from queuesim.queue_simulator import QueueSimulator
+from queuesim.dtmc_sizer import correct_pdr_for_packet_size
+from queuesim.phy_layer import calculate_tx_time_ms, get_base_latency_ms
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+RAT_STR = {RATType.DSRC: "dsrc", RATType.PC5: "pc5", RATType.FiveG: "5g"}
+
+
+def _actual_latency(state: NetworkState, rat: RATType) -> Optional[float]:
+    """Return the ground-truth latency for *rat* from the network state."""
+    if rat == RATType.DSRC:
+        return state.dsrc_latency_ms
+    if rat == RATType.PC5:
+        return state.pc5_latency_ms
+    if rat == RATType.FiveG:
+        return state.fiveg_latency_ms
+    return None
+
+
+def _actual_pdr(state: NetworkState, rat: RATType) -> Optional[float]:
+    if rat == RATType.DSRC:
+        return state.dsrc_pdr
+    if rat == RATType.PC5:
+        return state.pc5_pdr
+    if rat == RATType.FiveG:
+        return state.fiveg_pdr
+    return None
+
+
+def _simulate_tx(
+    rat: RATType,
+    packet_size: int,
+    predicted_pdr: float,
+    base_packet_size: int,
+    correction_exponent: float,
+) -> Tuple[bool, float, float]:
+    """Simulate a single transmission.  Returns (delivered, latency_ms, corrected_pdr)."""
+    corrected_pdr = correct_pdr_for_packet_size(
+        predicted_pdr, base_packet_size, packet_size, correction_exponent,
+    )
+    delivered = random.random() < corrected_pdr
+
+    tx_time = calculate_tx_time_ms(packet_size, rat)
+    base_lat = get_base_latency_ms(rat)
+
+    if rat == RATType.DSRC:
+        jitter = 0.5 + random.random()
+    else:
+        jitter = 0.8 + 0.4 * random.random()
+
+    size_factor = packet_size / base_packet_size
+    latency = (base_lat + tx_time) * jitter * (0.95 + 0.1 * size_factor)
+    return delivered, latency, corrected_pdr
+
+
+# ---------------------------------------------------------------------------
+# Multi-vehicle contention model
+# ---------------------------------------------------------------------------
+
+# PDR penalty per additional vehicle sharing the same RAT
+PDR_PENALTY = {
+    RATType.FiveG: 0.01,   # scheduled access, minimal collision
+    RATType.PC5: 0.03,     # semi-persistent sensing, moderate collision
+    RATType.DSRC: 0.04,    # CSMA/CA contention, highest collision risk
+}
+
+# Latency increase factor per additional vehicle
+LATENCY_DELAY_FACTOR = {
+    RATType.FiveG: 0.05,
+    RATType.PC5: 0.08,
+    RATType.DSRC: 0.12,
+}
+
+# Per-vehicle signal noise standard deviations
+SIGNAL_NOISE_STD = {
+    "latency": 0.5,
+    "pdr": 0.02,
+    "sinr": 3.0,
+    "rsrp": 2.0,
+}
+
+
+def _apply_pdr_contention(base_pdr: float, n_vehicles: int, rat: RATType) -> float:
+    """Degrade PDR based on number of vehicles sharing the same RAT."""
+    if n_vehicles <= 1:
+        return base_pdr
+    penalty = PDR_PENALTY.get(rat, 0.03)
+    contention_factor = max(0.5, 1.0 - (n_vehicles - 1) * penalty)
+    return base_pdr * contention_factor
+
+
+def _apply_latency_contention(
+    base_latency: float, n_vehicles: int, rat: RATType,
+) -> float:
+    """Increase latency based on number of vehicles sharing the same RAT."""
+    if n_vehicles <= 1:
+        return base_latency
+    delay_factor = LATENCY_DELAY_FACTOR.get(rat, 0.08)
+    contention_delay = base_latency * (n_vehicles - 1) * delay_factor
+    return base_latency + contention_delay
+
+
+def _perturb_state(
+    state: NetworkState, rng: np.random.RandomState,
+) -> NetworkState:
+    """Return a copy of *state* with per-vehicle signal noise added."""
+    d = state.to_dict()
+
+    lat_noise = rng.normal(0, SIGNAL_NOISE_STD["latency"])
+    pdr_noise = rng.normal(0, SIGNAL_NOISE_STD["pdr"])
+    sinr_noise = rng.normal(0, SIGNAL_NOISE_STD["sinr"])
+    rsrp_noise = rng.normal(0, SIGNAL_NOISE_STD["rsrp"])
+
+    for key in ("dsrc_latency_ms", "pc5_latency_ms", "fiveg_latency_ms"):
+        if d.get(key) is not None:
+            d[key] = max(0.1, d[key] + lat_noise)
+
+    for key in ("dsrc_pdr", "pc5_pdr", "fiveg_pdr"):
+        if d.get(key) is not None:
+            d[key] = float(np.clip(d[key] + pdr_noise, 0.0, 1.0))
+
+    if d.get("fiveg_sinr") is not None:
+        d["fiveg_sinr"] = d["fiveg_sinr"] + sinr_noise
+
+    for key in ("fiveg_rsrp", "dsrc_rsrp_1", "dsrc_rsrp_2"):
+        if d.get(key) is not None:
+            d[key] = d[key] + rsrp_noise
+
+    return NetworkState.from_dict(d)
+
+
+def _simulate_tx_with_contention(
+    rat: RATType,
+    packet_size: int,
+    predicted_pdr: float,
+    base_packet_size: int,
+    correction_exponent: float,
+    n_vehicles_on_rat: int,
+) -> Tuple[bool, float, float]:
+    """Simulate TX with contention effects.  Returns (delivered, latency_ms, corrected_pdr)."""
+    # Base simulation (same as _simulate_tx)
+    corrected_pdr = correct_pdr_for_packet_size(
+        predicted_pdr, base_packet_size, packet_size, correction_exponent,
+    )
+
+    # Apply contention to PDR
+    contended_pdr = _apply_pdr_contention(corrected_pdr, n_vehicles_on_rat, rat)
+    delivered = random.random() < contended_pdr
+
+    tx_time = calculate_tx_time_ms(packet_size, rat)
+    base_lat = get_base_latency_ms(rat)
+
+    if rat == RATType.DSRC:
+        jitter = 0.5 + random.random()
+    else:
+        jitter = 0.8 + 0.4 * random.random()
+
+    size_factor = packet_size / base_packet_size
+    base_latency = (base_lat + tx_time) * jitter * (0.95 + 0.1 * size_factor)
+
+    # Apply contention to latency
+    latency = _apply_latency_contention(base_latency, n_vehicles_on_rat, rat)
+    return delivered, latency, contended_pdr
+
+
+# ---------------------------------------------------------------------------
+# Retraining logic
+# ---------------------------------------------------------------------------
+
+def _retrain_model(
+    api: RATSelectionAPI,
+    rat_str: str,
+    x_buffer: np.ndarray,
+    y_latency: np.ndarray,
+    y_pdr: np.ndarray,
+    cycle: int,
+    retrain_log: List[Dict],
+):
+    """Run one retraining cycle on the buffered data for *rat_str*."""
+    model = api.models[rat_str]
+
+    # Evaluate loss before retraining
+    y_dict = {"latency_ms": y_latency, "pdr": y_pdr}
+    loss_before = model.evaluate(x_buffer, y_dict, verbose=0)
+    # model.evaluate returns [total_loss, latency_loss, pdr_loss, latency_rmse, pdr_rmse]
+    total_loss_before = loss_before[0] if isinstance(loss_before, list) else loss_before
+
+    # Retrain for 1 epoch
+    history = model.fit(
+        x_buffer, y_dict,
+        epochs=1, batch_size=32, verbose=0,
+    )
+    total_loss_after = history.history["loss"][0]
+
+    # Save checkpoint
+    save_path = os.path.join(
+        MODEL_DIR,
+        f"retrained_{api.model_type}_{rat_str}_{int(time.time())}.keras",
+    )
+    model.save(save_path)
+
+    retrain_log.append({
+        "cycle": cycle,
+        "rat": rat_str,
+        "n_samples": len(x_buffer),
+        "loss_before": total_loss_before,
+        "loss_after": total_loss_after,
+        "model_path": save_path,
+    })
+    print(
+        f"  Retrained {api.model_type}_{rat_str}: "
+        f"loss {total_loss_before:.5f} -> {total_loss_after:.5f}  "
+        f"({len(x_buffer)} samples, cycle {cycle})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+def run_feedback_loop(
+    input_csv: str,
+    model_type: str = "lstm",
+    seed: Optional[int] = None,
+    retrain_interval: int = 500,
+    base_packet_size: int = 1000,
+    correction_exponent: float = 0.8,
+):
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    ensure_dir_exists(OUTPUT_DIR)
+    ensure_dir_exists(MODEL_DIR)
+
+    # Load data
+    df = pd.read_csv(input_csv)
+    print(f"Loaded {len(df)} rows from {input_csv}")
+
+    # Initialise components
+    api = RATSelectionAPI(model_type=model_type)
+    qsim = QueueSimulator(
+        base_packet_size=base_packet_size,
+        correction_exponent=correction_exponent,
+    )
+    latency_scaler = create_latency_scaler()
+
+    # Per-RAT retraining buffers:  list of (sequence, y_latency_norm, y_pdr)
+    buffers: Dict[str, List[Tuple[np.ndarray, float, float]]] = {
+        "dsrc": [], "pc5": [], "5g": [],
+    }
+    retrain_count: Dict[str, int] = {"dsrc": 0, "pc5": 0, "5g": 0}
+
+    # Logging
+    row_log: List[Dict] = []
+    retrain_log: List[Dict] = []
+
+    # Simulated time (seconds, incremented by TX_INTERVAL)
+    sim_time = 0.0
+    previous_rat: Optional[RATType] = None
+    rat_switches = 0
+
+    print(f"\nStarting feedback loop ({len(df)} data points, retrain every {retrain_interval})\n")
+
+    for idx in range(len(df)):
+        row = df.iloc[idx]
+
+        # 1. Build NetworkState
+        state = row_to_network_state(row, timestamp_ms=int(sim_time * 1000))
+
+        # 2. RAT selection (also builds internal history/sequence)
+        queue_ctx = qsim.get_queue_context()
+        decision = api.select_rat(state, queue_ctx)
+        selected_rat = decision.selected_rat
+
+        if selected_rat == RATType.UNAVAILABLE:
+            sim_time += 0.1
+            continue
+
+        rat_str = RAT_STR[selected_rat]
+
+        # Track RAT switches
+        if previous_rat is not None and selected_rat != previous_rat:
+            rat_switches += 1
+        previous_rat = selected_rat
+
+        # 3. DTMC packet sizing
+        pkt_decision = qsim.decide_packet_size(decision, sim_time)
+        packet_size = pkt_decision.packet_size_bytes
+
+        # 4. Simulate transmission
+        delivered, sim_latency, corrected_pdr = _simulate_tx(
+            selected_rat, packet_size, decision.predicted_pdr,
+            base_packet_size, correction_exponent,
+        )
+
+        # 5. Feed outcome to DTMC (updates moving window immediately)
+        outcome = TransmissionOutcome(
+            timestamp_ms=int(sim_time * 1000),
+            rat_used=selected_rat,
+            packet_size_bytes=packet_size,
+            actual_latency_ms=sim_latency,
+            delivered=delivered,
+            network_state=state,
+        )
+        qsim.update_pdr_estimate(outcome)
+        qsim.metrics.total_packets += 1
+        if delivered:
+            qsim.metrics.successful_packets += 1
+
+        # 6. Capture sequence + ground-truth target for retraining
+        history = api._history[rat_str]
+        if len(history) >= TIMESTEPS:
+            seq = np.array(history[-TIMESTEPS:])  # (TIMESTEPS, n_features)
+
+            # Ground-truth targets from the CSV row
+            actual_lat = _actual_latency(state, selected_rat)
+            actual_pdr_val = _actual_pdr(state, selected_rat)
+
+            if actual_lat is not None and actual_pdr_val is not None:
+                # Normalise latency target the same way training data was prepared
+                lat_norm = latency_scaler.transform([[actual_lat]])[0][0]
+
+                # For PDR target, prefer DTMC window PDR (smoothed) over raw value
+                dtmc = qsim.dtmc_sizers.get(selected_rat)
+                window_pdr = dtmc.get_window_pdr(sim_time) if dtmc else None
+                pdr_target = window_pdr if window_pdr is not None else actual_pdr_val
+
+                buffers[rat_str].append((seq, lat_norm, pdr_target))
+
+        # 7. Check if retraining is due for this RAT
+        if len(buffers[rat_str]) >= retrain_interval and rat_str in api.models:
+            retrain_count[rat_str] += 1
+            buf = buffers[rat_str]
+
+            x_batch = np.array([b[0] for b in buf])
+            y_lat = np.array([b[1] for b in buf])
+            y_pdr = np.array([b[2] for b in buf])
+
+            _retrain_model(
+                api, rat_str, x_batch, y_lat, y_pdr,
+                cycle=retrain_count[rat_str],
+                retrain_log=retrain_log,
+            )
+            buffers[rat_str] = []
+
+        # 8. Retrieve DTMC state for logging
+        dtmc = qsim.dtmc_sizers.get(selected_rat)
+        dtmc_state = dtmc.current_state if dtmc else 0
+        dtmc_size = dtmc.current_size if dtmc else packet_size
+
+        # 9. Row-level log
+        row_log.append({
+            "idx": idx,
+            "sim_time": round(sim_time, 4),
+            "latitude": state.latitude,
+            "longitude": state.longitude,
+            "selected_rat": selected_rat.value,
+            "pred_latency": round(decision.predicted_latency_ms, 4),
+            "pred_pdr": round(decision.predicted_pdr, 4),
+            "actual_latency": round(_actual_latency(state, selected_rat) or 0.0, 4),
+            "actual_pdr": round(_actual_pdr(state, selected_rat) or 0.0, 4),
+            "sim_latency": round(sim_latency, 4),
+            "delivered": delivered,
+            "packet_size": packet_size,
+            "corrected_pdr": round(corrected_pdr, 4),
+            "dtmc_state": dtmc_state,
+            "dtmc_size": dtmc_size,
+            "confidence": round(decision.confidence, 4),
+            "queue_depth": qsim.queue_depth,
+        })
+
+        # Advance simulated time
+        sim_time += 0.1  # 100 ms TX interval
+
+        # Progress
+        if (idx + 1) % 500 == 0:
+            pdr_so_far = (
+                qsim.metrics.successful_packets / qsim.metrics.total_packets
+                if qsim.metrics.total_packets else 0
+            )
+            print(
+                f"  [{idx+1}/{len(df)}] "
+                f"PDR={pdr_so_far:.3f}  "
+                f"RAT switches={rat_switches}  "
+                f"retrains={sum(retrain_count.values())}"
+            )
+
+    # ----- Save outputs -----
+
+    # Row-level log
+    log_path = os.path.join(OUTPUT_DIR, "feedback_loop_log.csv")
+    pd.DataFrame(row_log).to_csv(log_path, index=False)
+    print(f"\nRow log saved to {log_path}")
+
+    # Retraining log
+    if retrain_log:
+        rt_path = os.path.join(OUTPUT_DIR, "feedback_loop_retraining_log.csv")
+        pd.DataFrame(retrain_log).to_csv(rt_path, index=False)
+        print(f"Retraining log saved to {rt_path}")
+
+    # DTMC stats
+    dtmc_stats = {}
+    for rat_enum, dtmc in qsim.dtmc_sizers.items():
+        stats = dtmc.get_statistics()
+        if stats:
+            for k, v in stats.items():
+                dtmc_stats[f"dtmc_{rat_enum.value}_{k}"] = v
+
+    # Summary
+    total = qsim.metrics.total_packets
+    success = qsim.metrics.successful_packets
+    achieved_pdr = success / total if total else 0
+    log_df = pd.DataFrame(row_log)
+
+    rat_dist = log_df["selected_rat"].value_counts().to_dict() if len(log_df) else {}
+
+    summary = {
+        "input_file": input_csv,
+        "model_type": model_type,
+        "seed": seed,
+        "total_rows": len(df),
+        "processed": total,
+        "successful": success,
+        "achieved_pdr": round(achieved_pdr, 4),
+        "mean_sim_latency": round(log_df["sim_latency"].mean(), 4) if len(log_df) else 0,
+        "mean_pred_latency": round(log_df["pred_latency"].mean(), 4) if len(log_df) else 0,
+        "rat_switches": rat_switches,
+        "retrain_cycles_total": sum(retrain_count.values()),
+        **{f"retrain_{k}": v for k, v in retrain_count.items()},
+        **{f"rat_{k}": v for k, v in rat_dist.items()},
+        **dtmc_stats,
+    }
+    summary_path = os.path.join(OUTPUT_DIR, "feedback_loop_summary.csv")
+    pd.DataFrame([summary]).to_csv(summary_path, index=False)
+    print(f"Summary saved to {summary_path}")
+
+    # Print summary to stdout
+    print("\n" + "=" * 64)
+    print("FEEDBACK LOOP RESULTS")
+    print("=" * 64)
+    print(f"  Total rows processed:  {total}")
+    print(f"  Achieved PDR:          {achieved_pdr:.4f}")
+    print(f"  Mean sim latency:      {summary['mean_sim_latency']:.2f} ms")
+    print(f"  Mean pred latency:     {summary['mean_pred_latency']:.2f} ms")
+    print(f"  RAT switches:          {rat_switches}")
+    print(f"  Retrain cycles:        {sum(retrain_count.values())} "
+          f"(dsrc={retrain_count['dsrc']}, pc5={retrain_count['pc5']}, 5g={retrain_count['5g']})")
+    print(f"  RAT distribution:      {rat_dist}")
+    for k, v in dtmc_stats.items():
+        print(f"  {k}: {v}")
+    print("=" * 64)
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Multi-vehicle loop
+# ---------------------------------------------------------------------------
+
+def run_multi_vehicle_loop(
+    input_csv: str,
+    model_type: str = "lstm",
+    seed: Optional[int] = None,
+    retrain_interval: int = 500,
+    base_packet_size: int = 1000,
+    correction_exponent: float = 0.8,
+    num_vehicles: int = 20,
+):
+    """Run multi-vehicle platoon simulation with contention effects.
+
+    Each vehicle has its own feature history, DTMC sizer, and queue simulator.
+    Models and retraining buffers are shared globally.
+    """
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    ensure_dir_exists(OUTPUT_DIR)
+    ensure_dir_exists(MODEL_DIR)
+
+    df = pd.read_csv(input_csv)
+    print(f"Loaded {len(df)} rows from {input_csv}")
+    print(f"Simulating {num_vehicles} vehicles\n")
+
+    # Shared components
+    api = RATSelectionAPI(model_type=model_type)
+    latency_scaler = create_latency_scaler()
+
+    # Per-vehicle components
+    vehicle_rngs = [np.random.RandomState(seed + v if seed is not None else v)
+                    for v in range(num_vehicles)]
+    vehicle_qsims = [
+        QueueSimulator(
+            base_packet_size=base_packet_size,
+            correction_exponent=correction_exponent,
+        )
+        for _ in range(num_vehicles)
+    ]
+    # Per-vehicle history mirrors the api._history structure
+    vehicle_histories: List[Dict[str, list]] = [
+        {"dsrc": [], "pc5": [], "5g": []}
+        for _ in range(num_vehicles)
+    ]
+
+    # Global per-RAT retraining buffers
+    buffers: Dict[str, List[Tuple[np.ndarray, float, float]]] = {
+        "dsrc": [], "pc5": [], "5g": [],
+    }
+    retrain_count: Dict[str, int] = {"dsrc": 0, "pc5": 0, "5g": 0}
+
+    # Logging
+    row_log: List[Dict] = []
+    retrain_log: List[Dict] = []
+    contention_log: List[Dict] = []
+
+    # Global TX counters
+    total_packets = 0
+    successful_packets = 0
+    # Per-vehicle counters
+    vehicle_packets = [0] * num_vehicles
+    vehicle_success = [0] * num_vehicles
+    vehicle_switches = [0] * num_vehicles
+    vehicle_prev_rat: List[Optional[RATType]] = [None] * num_vehicles
+
+    sim_time = 0.0
+
+    print(f"Starting multi-vehicle feedback loop "
+          f"({len(df)} time steps x {num_vehicles} vehicles, "
+          f"retrain every {retrain_interval})\n")
+
+    for idx in range(len(df)):
+        row = df.iloc[idx]
+        base_state = row_to_network_state(row, timestamp_ms=int(sim_time * 1000))
+
+        # Phase 1: All vehicles select RATs
+        decisions: List[Optional[RATDecision]] = [None] * num_vehicles
+        pkt_decisions: List[Optional[PacketSizeDecision]] = [None] * num_vehicles
+        vehicle_rats: List[Optional[RATType]] = [None] * num_vehicles
+
+        for v in range(num_vehicles):
+            state_v = _perturb_state(base_state, vehicle_rngs[v])
+
+            # Swap in this vehicle's history
+            api._history = vehicle_histories[v]
+
+            queue_ctx = vehicle_qsims[v].get_queue_context()
+            decision = api.select_rat(state_v, queue_ctx)
+
+            # Save updated history back
+            vehicle_histories[v] = api._history
+
+            if decision.selected_rat == RATType.UNAVAILABLE:
+                continue
+
+            decisions[v] = decision
+            vehicle_rats[v] = decision.selected_rat
+            pkt_decisions[v] = vehicle_qsims[v].decide_packet_size(
+                decision, sim_time,
+            )
+
+        # Phase 2: Count vehicles per RAT
+        active_rats = [r for r in vehicle_rats if r is not None]
+        vehicles_per_rat = Counter(active_rats)
+
+        # Log contention for this time step
+        contention_entry = {"idx": idx, "sim_time": round(sim_time, 4)}
+        for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
+            n = vehicles_per_rat.get(rat_enum, 0)
+            rstr = RAT_STR[rat_enum]
+            contention_entry[f"n_{rstr}"] = n
+            if n > 0:
+                contention_entry[f"pdr_factor_{rstr}"] = round(
+                    max(0.5, 1.0 - (n - 1) * PDR_PENALTY[rat_enum]), 4,
+                )
+            else:
+                contention_entry[f"pdr_factor_{rstr}"] = 1.0
+        contention_log.append(contention_entry)
+
+        # Phase 3: Simulate TX with contention
+        for v in range(num_vehicles):
+            if decisions[v] is None:
+                continue
+
+            decision = decisions[v]
+            selected_rat = decision.selected_rat
+            rat_str = RAT_STR[selected_rat]
+            pkt_decision = pkt_decisions[v]
+            packet_size = pkt_decision.packet_size_bytes
+            n_on_rat = vehicles_per_rat[selected_rat]
+            state_v = _perturb_state(base_state, vehicle_rngs[v])
+
+            # Track switches
+            if vehicle_prev_rat[v] is not None and selected_rat != vehicle_prev_rat[v]:
+                vehicle_switches[v] += 1
+            vehicle_prev_rat[v] = selected_rat
+
+            # Simulate with contention
+            delivered, sim_latency, contended_pdr = _simulate_tx_with_contention(
+                selected_rat, packet_size, decision.predicted_pdr,
+                base_packet_size, correction_exponent, n_on_rat,
+            )
+
+            # Feed outcome to this vehicle's queue simulator
+            outcome = TransmissionOutcome(
+                timestamp_ms=int(sim_time * 1000),
+                rat_used=selected_rat,
+                packet_size_bytes=packet_size,
+                actual_latency_ms=sim_latency,
+                delivered=delivered,
+                network_state=state_v,
+            )
+            vehicle_qsims[v].update_pdr_estimate(outcome)
+            vehicle_qsims[v].metrics.total_packets += 1
+            if delivered:
+                vehicle_qsims[v].metrics.successful_packets += 1
+
+            total_packets += 1
+            vehicle_packets[v] += 1
+            if delivered:
+                successful_packets += 1
+                vehicle_success[v] += 1
+
+            # Build retraining sequence from this vehicle's history
+            history = vehicle_histories[v].get(rat_str, [])
+            if len(history) >= TIMESTEPS:
+                seq = np.array(history[-TIMESTEPS:])
+                actual_lat = _actual_latency(state_v, selected_rat)
+                actual_pdr_val = _actual_pdr(state_v, selected_rat)
+
+                if actual_lat is not None and actual_pdr_val is not None:
+                    lat_norm = latency_scaler.transform([[actual_lat]])[0][0]
+                    dtmc = vehicle_qsims[v].dtmc_sizers.get(selected_rat)
+                    window_pdr = dtmc.get_window_pdr(sim_time) if dtmc else None
+                    pdr_target = window_pdr if window_pdr is not None else actual_pdr_val
+                    buffers[rat_str].append((seq, lat_norm, pdr_target))
+
+            # DTMC state for logging
+            dtmc = vehicle_qsims[v].dtmc_sizers.get(selected_rat)
+            dtmc_state = dtmc.current_state if dtmc else 0
+            dtmc_size = dtmc.current_size if dtmc else packet_size
+
+            row_log.append({
+                "idx": idx,
+                "vehicle_id": v,
+                "sim_time": round(sim_time, 4),
+                "latitude": state_v.latitude,
+                "longitude": state_v.longitude,
+                "selected_rat": selected_rat.value,
+                "pred_latency": round(decision.predicted_latency_ms, 4),
+                "pred_pdr": round(decision.predicted_pdr, 4),
+                "actual_latency": round(_actual_latency(state_v, selected_rat) or 0.0, 4),
+                "actual_pdr": round(_actual_pdr(state_v, selected_rat) or 0.0, 4),
+                "sim_latency": round(sim_latency, 4),
+                "delivered": delivered,
+                "packet_size": packet_size,
+                "corrected_pdr": round(contended_pdr, 4),
+                "contention_level": n_on_rat,
+                "dtmc_state": dtmc_state,
+                "dtmc_size": dtmc_size,
+                "confidence": round(decision.confidence, 4),
+                "queue_depth": vehicle_qsims[v].queue_depth,
+            })
+
+        # Phase 4: Check retraining threshold (global, per RAT)
+        for rat_str_r in ("dsrc", "pc5", "5g"):
+            if len(buffers[rat_str_r]) >= retrain_interval and rat_str_r in api.models:
+                retrain_count[rat_str_r] += 1
+                buf = buffers[rat_str_r]
+                x_batch = np.array([b[0] for b in buf])
+                y_lat = np.array([b[1] for b in buf])
+                y_pdr = np.array([b[2] for b in buf])
+                _retrain_model(
+                    api, rat_str_r, x_batch, y_lat, y_pdr,
+                    cycle=retrain_count[rat_str_r],
+                    retrain_log=retrain_log,
+                )
+                buffers[rat_str_r] = []
+
+        sim_time += 0.1
+
+        # Progress
+        if (idx + 1) % 500 == 0:
+            pdr_so_far = successful_packets / total_packets if total_packets else 0
+            print(
+                f"  [{idx+1}/{len(df)}] "
+                f"PDR={pdr_so_far:.3f}  "
+                f"total_tx={total_packets}  "
+                f"retrains={sum(retrain_count.values())}"
+            )
+
+    # ----- Save outputs -----
+
+    # Row-level log
+    log_path = os.path.join(OUTPUT_DIR, "feedback_multi_log.csv")
+    pd.DataFrame(row_log).to_csv(log_path, index=False)
+    print(f"\nRow log saved to {log_path}")
+
+    # Retraining log
+    if retrain_log:
+        rt_path = os.path.join(OUTPUT_DIR, "feedback_multi_retraining_log.csv")
+        pd.DataFrame(retrain_log).to_csv(rt_path, index=False)
+        print(f"Retraining log saved to {rt_path}")
+
+    # Contention log
+    ct_path = os.path.join(OUTPUT_DIR, "feedback_multi_contention.csv")
+    pd.DataFrame(contention_log).to_csv(ct_path, index=False)
+    print(f"Contention log saved to {ct_path}")
+
+    # Per-vehicle stats
+    achieved_pdr = successful_packets / total_packets if total_packets else 0
+    log_df = pd.DataFrame(row_log)
+    rat_dist = log_df["selected_rat"].value_counts().to_dict() if len(log_df) else {}
+
+    per_vehicle_rows = []
+    for v in range(num_vehicles):
+        vpdr = vehicle_success[v] / vehicle_packets[v] if vehicle_packets[v] else 0
+        v_df = log_df[log_df["vehicle_id"] == v] if len(log_df) else pd.DataFrame()
+        per_vehicle_rows.append({
+            "vehicle_id": v,
+            "total_packets": vehicle_packets[v],
+            "successful_packets": vehicle_success[v],
+            "achieved_pdr": round(vpdr, 4),
+            "mean_sim_latency": round(v_df["sim_latency"].mean(), 4) if len(v_df) else 0,
+            "rat_switches": vehicle_switches[v],
+        })
+
+    # DTMC stats (aggregate across all vehicles)
+    dtmc_stats = {}
+    for v in range(num_vehicles):
+        for rat_enum, dtmc in vehicle_qsims[v].dtmc_sizers.items():
+            stats = dtmc.get_statistics()
+            if stats:
+                for k, val in stats.items():
+                    key = f"dtmc_{rat_enum.value}_{k}"
+                    dtmc_stats.setdefault(key, [])
+                    dtmc_stats[key].append(val)
+    dtmc_agg = {k: round(np.mean(v), 4) for k, v in dtmc_stats.items()}
+
+    summary = {
+        "input_file": input_csv,
+        "model_type": model_type,
+        "seed": seed,
+        "num_vehicles": num_vehicles,
+        "total_rows": len(df),
+        "total_packets": total_packets,
+        "successful_packets": successful_packets,
+        "achieved_pdr": round(achieved_pdr, 4),
+        "mean_sim_latency": round(log_df["sim_latency"].mean(), 4) if len(log_df) else 0,
+        "mean_pred_latency": round(log_df["pred_latency"].mean(), 4) if len(log_df) else 0,
+        "total_rat_switches": sum(vehicle_switches),
+        "retrain_cycles_total": sum(retrain_count.values()),
+        **{f"retrain_{k}": v for k, v in retrain_count.items()},
+        **{f"rat_{k}": v for k, v in rat_dist.items()},
+        **dtmc_agg,
+    }
+
+    summary_path = os.path.join(OUTPUT_DIR, "feedback_multi_summary.csv")
+    # Save summary + per-vehicle detail
+    pd.DataFrame([summary]).to_csv(summary_path, index=False)
+    pd.DataFrame(per_vehicle_rows).to_csv(
+        os.path.join(OUTPUT_DIR, "feedback_multi_per_vehicle.csv"), index=False,
+    )
+    print(f"Summary saved to {summary_path}")
+
+    # Print summary
+    print("\n" + "=" * 64)
+    print(f"MULTI-VEHICLE FEEDBACK LOOP RESULTS ({num_vehicles} vehicles)")
+    print("=" * 64)
+    print(f"  Time steps:            {len(df)}")
+    print(f"  Total transmissions:   {total_packets}")
+    print(f"  Achieved PDR:          {achieved_pdr:.4f}")
+    print(f"  Mean sim latency:      {summary['mean_sim_latency']:.2f} ms")
+    print(f"  Mean pred latency:     {summary['mean_pred_latency']:.2f} ms")
+    print(f"  Total RAT switches:    {sum(vehicle_switches)}")
+    print(f"  Retrain cycles:        {sum(retrain_count.values())} "
+          f"(dsrc={retrain_count['dsrc']}, pc5={retrain_count['pc5']}, 5g={retrain_count['5g']})")
+    print(f"  RAT distribution:      {rat_dist}")
+    for k, v in dtmc_agg.items():
+        print(f"  {k}: {v}")
+    print("=" * 64)
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Closed-loop feedback simulation with RAT selection, DTMC, and retraining"
+    )
+    parser.add_argument("--input", type=str, required=True, help="Path to super_merged CSV")
+    parser.add_argument("--model_type", type=str, default="lstm", choices=["lstm", "gru", "rnn"])
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    parser.add_argument("--retrain_interval", type=int, default=500,
+                        help="Samples per RAT before retraining (default: 500)")
+    parser.add_argument("--base_packet_size", type=int, default=1000)
+    parser.add_argument("--correction_exponent", type=float, default=0.8)
+    parser.add_argument("--num_vehicles", type=int, default=1,
+                        help="Number of vehicles in platoon (default: 1 = single-vehicle mode)")
+    args = parser.parse_args()
+
+    if args.num_vehicles > 1:
+        run_multi_vehicle_loop(
+            input_csv=args.input,
+            model_type=args.model_type,
+            seed=args.seed,
+            retrain_interval=args.retrain_interval,
+            base_packet_size=args.base_packet_size,
+            correction_exponent=args.correction_exponent,
+            num_vehicles=args.num_vehicles,
+        )
+    else:
+        run_feedback_loop(
+            input_csv=args.input,
+            model_type=args.model_type,
+            seed=args.seed,
+            retrain_interval=args.retrain_interval,
+            base_packet_size=args.base_packet_size,
+            correction_exponent=args.correction_exponent,
+        )
+
+
+if __name__ == "__main__":
+    main()
