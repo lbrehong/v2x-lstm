@@ -74,7 +74,10 @@ lstm/
 |   |-- rat_selection.py           # RAT selection algorithms, Folium visualization, statistics
 |   `-- file_integration.py        # File-based integration for batch/interleaved processing
 |
+|-- run_pipeline.py                # End-to-end pipeline runner (direct Python imports, no subprocesses)
+|
 |-- scripts/                       # Data prep & visualization CLI tools
+|   |-- feedback_loop.py           # Feedback loop with incremental retraining
 |   |-- trimmers.py                # Raw V2X/5G log processing, latency drift compensation
 |   |-- prepare_data.py            # Cross-RAT data matching by GPS coordinates
 |   `-- plot_history.py            # Training history visualization
@@ -90,6 +93,60 @@ lstm/
 ```
 
 ## Usage
+
+### Full Pipeline (Recommended)
+
+The `run_pipeline.py` script orchestrates all stages (trim, match, train, select, feedback) in a single command. This is the recommended way to run the project end-to-end.
+
+```bash
+# Full pipeline from raw logs
+python -m run_pipeline --raw_data /path/to/raw_logs \
+                               --data /path/to/trimmed_logs \
+                               --model lstm --seed 42
+
+# Skip trimming, start from existing trimmed CSVs
+python -m run_pipeline --data /path/to/trimmed_logs \
+                               --model lstm --seed 42
+
+# Use preprocessed NPZ files with existing models
+python -m run_pipeline --npz output/5g_lstm_data.npz \
+                               --model lstm --load existing --seed 42
+
+# Incremental learning with new field data
+python -m run_pipeline --data /path/to/trimmed_logs \
+                               --new_data /path/to/new_logs \
+                               --model lstm
+
+# Multi-vehicle feedback loop (20 vehicles)
+python -m run_pipeline --data /path/to/trimmed_logs \
+                               --model lstm --num_vehicles 20 --seed 42
+
+# RAT selection only (skip training, use existing models)
+python -m run_pipeline --data /path/to/trimmed_logs \
+                               --model lstm --skip_training
+```
+
+**Key options:**
+
+| Argument | Description |
+|----------|-------------|
+| `--raw_data` | Raw log folder (triggers trimming step) |
+| `--data` | Trimmed CSV folder (training + matching) |
+| `--npz` | Preprocessed NPZ archive (skips CSV processing) |
+| `--new_data` | New data folder for incremental learning |
+| `--model` | Architecture: `lstm`, `gru`, or `rnn` (default: `lstm`) |
+| `--rats` | RATs to train (default: `5g pc5 dsrc`) |
+| `--num_vehicles` | Number of vehicles for feedback loop (default: 1) |
+| `--seed` | Random seed for reproducibility |
+| `--skip_trimming` | Skip the trimming stage |
+| `--skip_matching` | Skip GPS matching stage |
+| `--skip_training` | Skip model training stage |
+| `--skip_selection` | Skip RAT selection stage |
+| `--skip_feedback` | Skip feedback loop stage |
+
+### Individual Pipeline Stages
+
+The stages below can also be run independently. See `doc/PIPELINE.md` for detailed documentation of each stage.
 
 ### Data Preprocessing
 

@@ -30,6 +30,42 @@ Raw Logs --> Trim --> Match by GPS --> Train Models
 
 ---
 
+## Running the Full Pipeline
+
+The `run_pipeline.py` script (at project root) orchestrates all stages in a single invocation. It uses direct Python function imports rather than subprocess calls, so all stages run in the same process with shared state.
+
+```bash
+# Full pipeline from raw logs (all 6 stages)
+python -m run_pipeline --raw_data /path/to/raw_logs \
+                               --data /path/to/trimmed_logs \
+                               --model lstm --seed 42
+
+# Start from trimmed CSVs (stages 2-6)
+python -m run_pipeline --data /path/to/trimmed_logs \
+                               --model lstm --seed 42
+
+# Use preprocessed NPZ + existing models (stages 4-6)
+python -m run_pipeline --npz output/5g_lstm_data.npz \
+                               --model lstm --load existing --seed 42
+
+# Incremental learning with new field data
+python -m run_pipeline --data /path/to/trimmed_logs \
+                               --new_data /path/to/new_logs \
+                               --model lstm
+
+# Multi-vehicle feedback loop (20 vehicles)
+python -m run_pipeline --data /path/to/trimmed_logs \
+                               --model lstm --num_vehicles 20 --seed 42
+```
+
+Individual stages can be skipped with `--skip_trimming`, `--skip_matching`, `--skip_training`, `--skip_selection`, or `--skip_feedback`. At least one data source (`--raw_data`, `--data`, `--npz`, or `--merged_csv`) must be provided.
+
+Run `python -m run_pipeline --help` for the full argument reference.
+
+The rest of this document describes each stage in detail, which is useful both for understanding the pipeline runner and for running stages individually.
+
+---
+
 ## Stage 1: Trim Raw Logs
 
 Raw vehicular network logs (5G, PC5, DSRC) contain noisy measurements with clock drift and inconsistent formats. The trimmer standardizes them.
