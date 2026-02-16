@@ -202,7 +202,7 @@ def trim_sa(file_list, output_file, path, th=None, xmin=None, xmax=None):
                 sinr = saved_sinr
                 rsrp = saved_rsrp
             else:
-                sinr = str(abs(int(parts[5].strip())))
+                sinr = str(abs(int(parts[5].strip())) / 10.0)  # Convert modem units to dB
                 rsrp = parts[6].strip()
                 saved_sinr = sinr
                 saved_rsrp = rsrp

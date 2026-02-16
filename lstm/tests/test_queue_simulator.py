@@ -243,12 +243,13 @@ class TestQueueSimulator:
     def test_get_queue_context(self):
         """Should return valid QueueContext."""
         sim = QueueSimulator()
-        sim.queue_depth = 5
+        sim._queue_depth[RATType.FiveG] = 5
 
         context = sim.get_queue_context()
         assert context.queue_depth == 5
         assert 0.0 <= context.urgency_level <= 1.0
         assert -1.0 <= context.recent_pdr_trend <= 1.0
+        assert RATType.FiveG in context.per_rat_queue_depth
 
     def test_decide_packet_size(self):
         """Should return PacketSizeDecision."""
@@ -299,7 +300,7 @@ class TestQueueSimulator:
     def test_reset(self):
         """Reset should clear all state."""
         sim = QueueSimulator()
-        sim.queue_depth = 10
+        sim._queue_depth[RATType.FiveG] = 10
         sim.recent_pdrs = [0.9, 0.8, 0.7]
 
         sim.reset()
@@ -589,19 +590,19 @@ class TestQueueSimulatorPHY:
         assert sim.queue_bytes == 0
 
         # Enqueue a packet
-        sim.enqueue(1000)
+        sim.enqueue(1000, RATType.FiveG)
         assert sim.queue_bytes == 1000
         assert sim.queue_depth == 1
 
         # Dequeue
-        sim.dequeue(1000)
+        sim.dequeue(1000, RATType.FiveG)
         assert sim.queue_bytes == 0
         assert sim.queue_depth == 0
 
     def test_can_enqueue_within_capacity(self):
         """Should allow enqueue within capacity."""
         sim = QueueSimulator()
-        assert sim.can_enqueue(1000)
+        assert sim.can_enqueue(1000, RATType.FiveG)
 
     def test_can_enqueue_at_capacity(self):
         """Should check capacity correctly using RB-based formula."""
@@ -609,11 +610,11 @@ class TestQueueSimulatorPHY:
         capacity = calculate_queue_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
 
         # Fill queue to near capacity
-        sim.queue_bytes = capacity - 1000
-        assert sim.can_enqueue(1000)  # Should fit
+        sim._queue_bytes[RATType.FiveG] = capacity - 1000
+        assert sim.can_enqueue(1000, RATType.FiveG)  # Should fit
 
-        sim.queue_bytes = capacity
-        assert not sim.can_enqueue(1)  # Should not fit
+        sim._queue_bytes[RATType.FiveG] = capacity
+        assert not sim.can_enqueue(1, RATType.FiveG)  # Should not fit
 
     def test_enqueue_drops_on_overflow(self):
         """Enqueue should return False and track dropped packets on overflow."""
@@ -621,32 +622,33 @@ class TestQueueSimulatorPHY:
         capacity = calculate_queue_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
 
         # Fill queue to capacity
-        sim.queue_bytes = capacity
+        sim._queue_bytes[RATType.FiveG] = capacity
 
         # Try to enqueue more
-        result = sim.enqueue(1000)
+        result = sim.enqueue(1000, RATType.FiveG)
         assert result is False
         assert sim.metrics.dropped_packets == 1
+        assert sim.metrics.per_rat_dropped_packets[RATType.FiveG] == 1
 
     def test_enqueue_without_phy_limits(self):
         """Enqueue should always succeed without PHY limits."""
         sim = QueueSimulator(enforce_phy_limits=False)
 
         # Simulate very full queue
-        sim.queue_bytes = 1_000_000_000  # 1GB
+        sim._queue_bytes[RATType.FiveG] = 1_000_000_000  # 1GB
 
         # Should still allow enqueue
-        assert sim.can_enqueue(1000)
+        assert sim.can_enqueue(1000, RATType.FiveG)
 
     def test_max_queue_depth_tracking(self):
         """Max queue depth should be tracked."""
         sim = QueueSimulator()
 
-        sim.enqueue(1000)
-        sim.enqueue(1000)
+        sim.enqueue(1000, RATType.FiveG)
+        sim.enqueue(1000, RATType.FiveG)
         assert sim.metrics.max_queue_depth == 2
 
-        sim.dequeue(1000)
+        sim.dequeue(1000, RATType.FiveG)
         assert sim.metrics.max_queue_depth == 2  # Max stays
 
     def test_get_queue_capacity(self):
@@ -693,8 +695,8 @@ class TestQueueSimulatorPHY:
     def test_reset_clears_queue_bytes(self):
         """Reset should clear queue bytes."""
         sim = QueueSimulator()
-        sim.queue_bytes = 5000
-        sim.queue_depth = 5
+        sim._queue_bytes[RATType.FiveG] = 5000
+        sim._queue_depth[RATType.FiveG] = 5
 
         sim.reset()
         assert sim.queue_bytes == 0
@@ -951,20 +953,19 @@ class TestRBCapacityIntegration:
     def test_queue_simulator_uses_rb_capacity(self):
         """QueueSimulator should use RB-based capacity for queue limits."""
         sim = QueueSimulator()
-        sim.current_rat = RATType.PC5
 
         # Get expected capacity from RB formula
         expected_capacity = calculate_queue_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
 
         # Fill to near capacity
-        sim.queue_bytes = expected_capacity - 100
+        sim._queue_bytes[RATType.PC5] = expected_capacity - 100
 
         # Should still accept small packet
-        assert sim.can_enqueue(100)
+        assert sim.can_enqueue(100, RATType.PC5)
 
         # Should reject when at capacity
-        sim.queue_bytes = expected_capacity
-        assert not sim.can_enqueue(1)
+        sim._queue_bytes[RATType.PC5] = expected_capacity
+        assert not sim.can_enqueue(1, RATType.PC5)
 
     def test_simulator_respects_rb_tx_limit(self):
         """Simulator should cap packet size at RB-based TX limit."""
@@ -1003,3 +1004,139 @@ class TestRBCapacityIntegration:
             expected_base = (packet_size * 8) / bits_per_ms
             # Allow for contention delay in DSRC
             assert tx_time >= expected_base * 0.9
+
+
+# =============================================================================
+# Per-RAT Queue Tests
+# =============================================================================
+
+class TestPerRATQueues:
+    """Tests for per-RAT independent queue behavior."""
+
+    def test_per_rat_queue_independence(self):
+        """Enqueue to 5G and DSRC separately, verify independent counters."""
+        sim = QueueSimulator()
+
+        sim.enqueue(1000, RATType.FiveG)
+        sim.enqueue(2000, RATType.DSRC)
+
+        assert sim._queue_depth[RATType.FiveG] == 1
+        assert sim._queue_depth[RATType.DSRC] == 1
+        assert sim._queue_depth[RATType.PC5] == 0
+        assert sim._queue_bytes[RATType.FiveG] == 1000
+        assert sim._queue_bytes[RATType.DSRC] == 2000
+        assert sim.queue_depth == 2  # Aggregate
+        assert sim.queue_bytes == 3000
+
+    def test_per_rat_queue_context(self):
+        """get_queue_context() should return per-RAT depths."""
+        sim = QueueSimulator()
+        sim.enqueue(1000, RATType.FiveG)
+        sim.enqueue(1000, RATType.FiveG)
+        sim.enqueue(1000, RATType.PC5)
+
+        ctx = sim.get_queue_context()
+        assert ctx.queue_depth == 3
+        assert ctx.per_rat_queue_depth[RATType.FiveG] == 2
+        assert ctx.per_rat_queue_depth[RATType.PC5] == 1
+
+    def test_aggregate_queue_depth_property(self):
+        """Sum of per-RAT depths should equal queue_depth property."""
+        sim = QueueSimulator()
+
+        sim.enqueue(500, RATType.FiveG)
+        sim.enqueue(500, RATType.PC5)
+        sim.enqueue(500, RATType.DSRC)
+
+        assert sim.queue_depth == sum(sim._queue_depth.values())
+
+    def test_per_rat_dropped_packets(self):
+        """Overflow on one RAT should not affect another."""
+        sim = QueueSimulator()
+
+        # Fill PC5 queue to capacity
+        pc5_capacity = calculate_queue_capacity_bytes(
+            RATType.PC5, get_tx_interval_ms(RATType.PC5),
+        )
+        sim._queue_bytes[RATType.PC5] = pc5_capacity
+
+        # PC5 should reject
+        assert sim.enqueue(1000, RATType.PC5) is False
+        assert sim.metrics.per_rat_dropped_packets.get(RATType.PC5, 0) == 1
+
+        # 5G should still accept
+        assert sim.enqueue(1000, RATType.FiveG) is True
+        assert sim.metrics.per_rat_dropped_packets.get(RATType.FiveG, 0) == 0
+
+    def test_dropped_packet_counts_as_pdr_loss(self):
+        """A dropped packet should feed update_pdr_estimate(delivered=False)."""
+        from api_types import TransmissionOutcome, NetworkState
+
+        sim = QueueSimulator()
+        dtmc = sim.dtmc_sizers[RATType.PC5]
+
+        # Record several successes to establish baseline
+        for i in range(10):
+            dtmc.record_outcome(i * 0.1, True)
+
+        pdr_before = dtmc.get_window_pdr(1.0)
+
+        # Feed a drop as a failure
+        outcome = TransmissionOutcome(
+            timestamp_ms=1100,
+            rat_used=RATType.PC5,
+            packet_size_bytes=1000,
+            actual_latency_ms=0.0,
+            delivered=False,
+            network_state=NetworkState(timestamp_ms=1100, latitude=43.56, longitude=1.47),
+        )
+        sim.update_pdr_estimate(outcome)
+
+        pdr_after = dtmc.get_window_pdr(1.1)
+        assert pdr_after is not None
+        assert pdr_before is not None
+        assert pdr_after < pdr_before
+
+    def test_integrated_parallel_processing(self):
+        """IntegratedQueueSimulator should produce results from multiple RATs."""
+        # Create data with mixed RATs
+        data = pd.DataFrame({
+            "latitude": [43.56] * 20,
+            "longitude": [1.47] * 20,
+            "selected_rat": ["5g"] * 7 + ["dsrc"] * 7 + ["pc5"] * 6,
+            "pred_pdr": [0.95] * 20,
+            "pred_latency": [15.0] * 20,
+            "confidence": [0.9] * 20,
+        })
+
+        sim = IntegratedQueueSimulator(network_data=data, seed=42)
+        metrics = sim.run(max_packets=20)
+
+        assert isinstance(metrics, SimulationMetrics)
+        assert metrics.total_packets > 0
+
+        # Should have results from multiple RATs
+        df = sim.get_results_dataframe()
+        assert len(df) > 0
+        # Results should be sorted by timestamp
+        assert df["timestamp"].is_monotonic_increasing
+
+    def test_per_rat_metrics_populated(self):
+        """Per-RAT metrics should be populated after simulation."""
+        data = pd.DataFrame({
+            "latitude": [43.56] * 10,
+            "longitude": [1.47] * 10,
+            "selected_rat": ["5g"] * 5 + ["dsrc"] * 5,
+            "pred_pdr": [0.95] * 10,
+            "pred_latency": [15.0] * 10,
+            "confidence": [0.9] * 10,
+        })
+
+        sim = IntegratedQueueSimulator(network_data=data, seed=42)
+        metrics = sim.run(max_packets=10)
+
+        # per_rat_max_queue_depth should have entries for RATs that were used
+        # (may be empty if all packets dequeued instantly)
+        assert isinstance(metrics.per_rat_max_queue_depth, dict)
+        assert isinstance(metrics.per_rat_mean_queue_depth, dict)
+        assert isinstance(metrics.per_rat_dropped_packets, dict)

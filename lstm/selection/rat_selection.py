@@ -100,25 +100,43 @@ def get_predictions(model, rat, gps_data):
 
 
 def merge_csvs(directory):
-    """Merge base CSV files with matched DSRC and PC5 data."""
+    """Merge base CSV files with matched DSRC and PC5 data, including signal columns."""
     df_super = pd.read_csv(os.path.join(directory, "super.csv"))
-    df_base_dsrc = pd.read_csv(os.path.join(directory, "matched_dsrc.csv"),
-                                usecols=["tx_latitude", "tx_longitude", "latency_ms", "pdr"])
+
+    # DSRC: include signal quality columns for feedback loop feature vectors
+    dsrc_cols = ["tx_latitude", "tx_longitude", "latency_ms", "pdr"]
+    dsrc_path = os.path.join(directory, "matched_dsrc.csv")
+    dsrc_available = pd.read_csv(dsrc_path, nrows=0).columns.tolist()
+    for col in ("rsrp_1", "rsrp_2"):
+        if col in dsrc_available:
+            dsrc_cols.append(col)
+    df_base_dsrc = pd.read_csv(dsrc_path, usecols=dsrc_cols)
+    df_base_dsrc.rename(columns={"latency_ms": "latency_ms_dsrc", "pdr": "pdr_dsrc"}, inplace=True)
+
+    # PC5
     df_base_pc5 = pd.read_csv(os.path.join(directory, "matched_pc5.csv"),
                                usecols=["tx_latitude", "tx_longitude", "latency_ms", "pdr"])
-    df_base_dsrc.rename(columns={"latency_ms": "latency_ms_dsrc", "pdr": "pdr_dsrc"}, inplace=True)
     df_base_pc5.rename(columns={"latency_ms": "latency_ms_pc5", "pdr": "pdr_pc5"}, inplace=True)
+
+    # 5G: include signal quality columns
+    fiveg_path = os.path.join(directory, "matched_5g.csv")
+    fiveg_available = pd.read_csv(fiveg_path, nrows=0).columns.tolist()
+    fiveg_signal_cols = [c for c in ("sinr", "rsrp") if c in fiveg_available]
+    if fiveg_signal_cols:
+        df_5g_signal = pd.read_csv(fiveg_path,
+                                    usecols=["tx_latitude", "tx_longitude"] + fiveg_signal_cols)
+        df_super = df_super.merge(df_5g_signal, on=["tx_latitude", "tx_longitude"], how="left")
 
     df_super = df_super.merge(df_base_dsrc, on=["tx_latitude", "tx_longitude"], how="left")
     df_super = df_super.merge(df_base_pc5, on=["tx_latitude", "tx_longitude"], how="left")
 
-    df_super.to_csv(os.path.join(directory, "super_merged.csv"))
+    df_super.to_csv(os.path.join(directory, "super_merged.csv"), index=False)
     return df_super
 
 
-def add_predictions(df, directory):
+def add_predictions(df, directory, model_types=None):
     """Add model predictions to the dataframe."""
-    for model_type in MODELS:
+    for model_type in (model_types or MODELS):
         for rat in RATS:
             filename = os.path.join(directory, f"final_log_{model_type}_{rat}.csv")
 
@@ -606,7 +624,7 @@ if __name__ == "__main__":
             print("_ Merging into the super-CSV.")
             super_df = merge_csvs(INPUT)
             print("_ Adding predictions into the super-CSV.")
-            super_pred_df = add_predictions(super_df, INPUT)
+            super_pred_df = add_predictions(super_df, INPUT, model_types=model_types)
             print("_ Merging done.")
             print("_ Sending to the selection algorithm.")
             for mt in model_types:

@@ -148,6 +148,7 @@ class QueueContext:
     recent_pdr_trend: float  # -1.0 (declining) to +1.0 (improving)
     target_latency_ms: float
     target_pdr: float
+    per_rat_queue_depth: Dict = field(default_factory=dict)  # {RATType: int}
 
     def __post_init__(self):
         """Validate ranges."""
@@ -162,7 +163,7 @@ class QueueContext:
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for CSV/file output."""
-        return {
+        result = {
             "queue_depth": self.queue_depth,
             "avg_packet_size_bytes": self.avg_packet_size_bytes,
             "urgency_level": self.urgency_level,
@@ -170,10 +171,20 @@ class QueueContext:
             "target_latency_ms": self.target_latency_ms,
             "target_pdr": self.target_pdr,
         }
+        for rat, depth in self.per_rat_queue_depth.items():
+            key = rat.value if isinstance(rat, RATType) else str(rat)
+            result[f"queue_depth_{key}"] = depth
+        return result
 
     @classmethod
     def from_dict(cls, d: Dict) -> "QueueContext":
         """Create QueueContext from dictionary."""
+        per_rat = {}
+        for rat in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
+            key = f"queue_depth_{rat.value}"
+            if key in d:
+                per_rat[rat] = int(d[key])
+
         return cls(
             queue_depth=int(d["queue_depth"]),
             avg_packet_size_bytes=int(d["avg_packet_size_bytes"]),
@@ -181,6 +192,7 @@ class QueueContext:
             recent_pdr_trend=float(d["recent_pdr_trend"]),
             target_latency_ms=float(d["target_latency_ms"]),
             target_pdr=float(d["target_pdr"]),
+            per_rat_queue_depth=per_rat,
         )
 
 

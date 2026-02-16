@@ -156,7 +156,7 @@ fi
 if [[ -n "$DATA" ]] && [[ "$SKIP_MATCHING" == false ]]; then
     # Only run matching if ALL required matched files exist
     all_matched=true
-    for f in matched_5g.csv matched_dsrc.csv matched_pc5.csv; do
+    for f in matched_5g.csv matched_dsrc.csv matched_pc5.csv super.csv; do
         if [[ ! -f "$DATA/$f" ]]; then
             all_matched=false
             break
@@ -184,7 +184,15 @@ if [[ "$SKIP_TRAINING" == false ]]; then
 
         # Data source
         if [[ -n "$NPZ" ]]; then
-            CMD+=(--npz "$NPZ")
+            # NPZ is per-RAT; construct the expected path
+            npz_dir="$(dirname "$NPZ")"
+            rat_npz="$npz_dir/${rat}_lstm_data.npz"
+            if [[ -f "$rat_npz" ]]; then
+                CMD+=(--npz "$rat_npz")
+            else
+                echo "  Warning: $rat_npz not found, falling back to CSV"
+                [[ -n "$DATA" ]] && CMD+=(--data "$DATA") || { echo "  Error: no data for $rat"; continue; }
+            fi
         elif [[ -n "$DATA" ]]; then
             CMD+=(--data "$DATA")
         else
@@ -219,12 +227,10 @@ else
     echo "-- Skipping selection (--skip_selection or no --data)"
 fi
 
-# Look for merged CSV for feedback loop (runs unconditionally)
+# Look for merged CSV for feedback loop (prefer super_merged which has signal columns)
 if [[ -z "$MERGED_CSV" ]] && [[ -n "$DATA" ]]; then
     if [[ -f "$DATA/super_merged.csv" ]]; then
         MERGED_CSV="$DATA/super_merged.csv"
-    elif [[ -f "$DATA/bestRAT_super.csv" ]]; then
-        MERGED_CSV="$DATA/bestRAT_super.csv"
     fi
 fi
 

@@ -261,7 +261,7 @@ class TestPreprocessLstmInput:
             'tx_latitude': np.linspace(43.556, 43.567, n),
             'tx_longitude': np.linspace(1.465, 1.471, n),
             'latency_ms': np.random.uniform(5, 45, n),
-            'sinr': np.random.uniform(210, 360, n),
+            'sinr': np.random.uniform(-5, 40, n),
             'rsrp': np.random.uniform(-120, -70, n),
             'pdr': np.random.uniform(0.85, 1.0, n),
         })
@@ -381,7 +381,7 @@ class TestPreprocessLstmInput:
             'tx_latitude': [MIN_LAT, 43.56, 43.57, MIN_LAT, 43.58],
             'tx_longitude': [MIN_LON, 1.465, 1.466, MIN_LON, 1.467],
             'latency_ms': [10, 15, 20, 25, 30],
-            'sinr': [250, 260, 270, 280, 290],
+            'sinr': [5, 15, 25, 30, 35],
             'rsrp': [-100, -95, -90, -85, -80],
             'pdr': [0.95, 0.96, 0.97, 0.98, 0.99],
         })

@@ -35,11 +35,10 @@ class TestConfigConstants:
         assert 1.0 < MAX_LON < 2.0
 
     def test_latency_bounds_valid(self):
-        """Latency bounds should be reasonable for V2X (4-50ms)."""
-        assert MIN_LATENCY > 0, "Minimum latency must be positive"
+        """Latency bounds should cover all RATs (DSRC ~1ms to 5G ~400ms)."""
+        assert MIN_LATENCY >= 0, "Minimum latency must be non-negative"
         assert MAX_LATENCY > MIN_LATENCY
-        assert MIN_LATENCY >= 1  # At least 1ms round trip
-        assert MAX_LATENCY <= 100  # V2X requirement is typically <100ms
+        assert MAX_LATENCY <= 1000  # Upper bound covers 5G tail
 
     def test_pdr_bounds_valid(self):
         """PDR bounds should be [0, 1]."""

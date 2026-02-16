@@ -100,6 +100,17 @@ def match_data(input_dir, primary=None, secondary=None):
         compute_pdr_rolling(secondary_df, "tx_timestamp_ms", PDR_WINDOW, get_tx_interval_ms(rat_key))
         secondary_df = secondary_df[secondary_df["latency_ms"] < 300.001]
 
+        # Filter RSRP sentinel values (16383 = physically impossible, modem error)
+        for rsrp_col in ("rsrp_1", "rsrp_2"):
+            if rsrp_col in secondary_df.columns:
+                n_bad = (secondary_df[rsrp_col] > 0).sum()
+                if n_bad > 0:
+                    print(f"  Filtering {n_bad} sentinel values in {rsrp_col} (> 0 dBm)")
+                    secondary_df[rsrp_col] = secondary_df[rsrp_col].where(
+                        secondary_df[rsrp_col] <= 0
+                    )
+                    secondary_df[rsrp_col] = secondary_df[rsrp_col].interpolate().bfill().ffill()
+
         matched_rows = []
         matched = 0
 

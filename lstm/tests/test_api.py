@@ -142,7 +142,7 @@ class TestStateToFeatures:
             pc5_pdr=0.99,
             fiveg_latency_ms=15.0,
             fiveg_pdr=0.995,
-            fiveg_sinr=320.0,
+            fiveg_sinr=25.0,
             fiveg_rsrp=-95.0,
         )
 
@@ -356,7 +356,7 @@ class TestRATSelectionWithMockedModels:
             pc5_pdr=0.99,
             fiveg_latency_ms=15.0,
             fiveg_pdr=0.995,
-            fiveg_sinr=320.0,
+            fiveg_sinr=25.0,
             fiveg_rsrp=-95.0,
         )
 

@@ -109,7 +109,7 @@ class TestNetworkState:
             pc5_pdr=0.99,
             fiveg_latency_ms=15.0,
             fiveg_pdr=0.995,
-            fiveg_sinr=320.0,
+            fiveg_sinr=25.0,
             fiveg_rsrp=-95.0,
         )
 
@@ -248,6 +248,45 @@ class TestQueueContext:
         assert restored.recent_pdr_trend == original.recent_pdr_trend
         assert restored.target_latency_ms == original.target_latency_ms
         assert restored.target_pdr == original.target_pdr
+
+    def test_queue_context_per_rat_roundtrip(self):
+        """to_dict -> from_dict should preserve per_rat_queue_depth."""
+        ctx = QueueContext(
+            queue_depth=10,
+            avg_packet_size_bytes=1000,
+            urgency_level=0.5,
+            recent_pdr_trend=0.0,
+            target_latency_ms=20.0,
+            target_pdr=0.99,
+            per_rat_queue_depth={
+                RATType.FiveG: 5,
+                RATType.DSRC: 3,
+                RATType.PC5: 2,
+            },
+        )
+        d = ctx.to_dict()
+        assert d["queue_depth_5g"] == 5
+        assert d["queue_depth_dsrc"] == 3
+        assert d["queue_depth_pc5"] == 2
+
+        restored = QueueContext.from_dict(d)
+        assert restored.per_rat_queue_depth[RATType.FiveG] == 5
+        assert restored.per_rat_queue_depth[RATType.DSRC] == 3
+        assert restored.per_rat_queue_depth[RATType.PC5] == 2
+
+    def test_queue_context_backward_compat_no_per_rat(self):
+        """QueueContext without per_rat_queue_depth should still work."""
+        d = {
+            "queue_depth": 5,
+            "avg_packet_size_bytes": 1000,
+            "urgency_level": 0.5,
+            "recent_pdr_trend": 0.0,
+            "target_latency_ms": 20.0,
+            "target_pdr": 0.99,
+        }
+        ctx = QueueContext.from_dict(d)
+        assert ctx.per_rat_queue_depth == {}
+        assert ctx.queue_depth == 5
 
     def test_queue_context_boundary_values(self):
         """QueueContext should handle boundary values correctly."""

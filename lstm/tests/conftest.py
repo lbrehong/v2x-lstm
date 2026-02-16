@@ -29,7 +29,7 @@ def sample_5g_data():
         'tx_latitude': np.linspace(43.555, 43.567, n_samples),
         'tx_longitude': np.linspace(1.464, 1.471, n_samples),
         'latency_ms': np.random.uniform(5, 40, n_samples),
-        'sinr': np.random.uniform(210, 360, n_samples),
+        'sinr': np.random.uniform(-5, 40, n_samples),
         'rsrp': np.random.uniform(-120, -70, n_samples),
         'pdr': np.random.uniform(0.8, 1.0, n_samples),
         'tx_timestamp_ms': np.arange(0, n_samples * 20, 20),  # 20ms intervals

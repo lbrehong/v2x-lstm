@@ -6,7 +6,10 @@ including subframe capacity, TX budget, queue sizing, and transmission time esti
 
 All calculations are based on 3GPP/IEEE PHY-layer parameters defined in config.RAT_PHY_CONFIG.
 """
-from typing import Dict
+from dataclasses import dataclass
+from typing import Dict, List
+
+import numpy as np
 
 from api_types import RATType
 from config import RAT_PHY_CONFIG, get_tx_interval_ms
@@ -199,3 +202,210 @@ def get_base_latency_ms(rat: RATType) -> float:
     """
     config = get_phy_config(rat)
     return config.get("base_latency_ms", 10.0)
+
+
+# =========================================================================
+# Multi-vehicle contention model (RB-consumption based)
+# =========================================================================
+
+@dataclass
+class ChannelAllocation:
+    """Result of channel allocation for a single vehicle."""
+    vehicle_idx: int
+    transmitted: bool
+    collision: bool
+    deferred: bool
+
+
+def compute_channel_utilization(
+    n_vehicles: int, packet_sizes: List[int], rat: RATType,
+) -> float:
+    """
+    Compute channel utilization as total demand / capacity per TX interval.
+
+    Args:
+        n_vehicles: Number of vehicles transmitting on this RAT
+        packet_sizes: Packet size in bytes for each vehicle
+        rat: The RAT type
+
+    Returns:
+        Utilization ratio (0.0+, can exceed 1.0 when overloaded)
+    """
+    if n_vehicles <= 0 or not packet_sizes:
+        return 0.0
+    tx_interval = get_tx_interval_ms(rat)
+    capacity_bytes = calculate_tx_capacity_bytes(rat, tx_interval)
+    if capacity_bytes <= 0:
+        return float("inf")
+    total_demand = sum(packet_sizes[:n_vehicles])
+    return total_demand / capacity_bytes
+
+
+def allocate_channel(
+    vehicle_demands: List[int], rat: RATType,
+    rng: np.random.RandomState,
+) -> List[ChannelAllocation]:
+    """
+    Allocate channel resources to vehicles using RAT-specific access mechanisms.
+
+    - 5G (scheduled): gNB fills RBs in random order; excess vehicles deferred.
+    - PC5 (SPS Mode 2): Each vehicle randomly selects a subchannel; collisions
+      occur when multiple vehicles pick the same subchannel.
+    - DSRC (CSMA/CA): All attempt; collision probability from Bianchi-inspired
+      model scaled by utilization.
+
+    Args:
+        vehicle_demands: Packet size in bytes per vehicle
+        rat: The RAT type
+        rng: NumPy RandomState for reproducibility
+
+    Returns:
+        List of ChannelAllocation, one per vehicle
+    """
+    n = len(vehicle_demands)
+    if n == 0:
+        return []
+
+    config = get_phy_config(rat)
+    tx_interval = get_tx_interval_ms(rat)
+    capacity_bytes = calculate_tx_capacity_bytes(rat, tx_interval)
+
+    if rat.value == "5g":
+        # Scheduled access: gNB serves vehicles in random order until capacity exhausted
+        order = rng.permutation(n)
+        used = 0
+        results = [None] * n
+        for idx in order:
+            if used + vehicle_demands[idx] <= capacity_bytes:
+                used += vehicle_demands[idx]
+                results[idx] = ChannelAllocation(idx, transmitted=True, collision=False, deferred=False)
+            else:
+                results[idx] = ChannelAllocation(idx, transmitted=False, collision=False, deferred=True)
+        return results
+
+    if rat.value == "pc5":
+        # SPS Mode 2: each vehicle randomly selects a subchannel
+        n_subch = config.get("n_subchannels_total", 5)
+        selections = rng.randint(0, n_subch, size=n)
+        # Count occupancy per subchannel
+        occupancy = {}
+        for i, s in enumerate(selections):
+            occupancy.setdefault(int(s), []).append(i)
+        results = [None] * n
+        for subch, vehicles in occupancy.items():
+            if len(vehicles) == 1:
+                i = vehicles[0]
+                results[i] = ChannelAllocation(i, transmitted=True, collision=False, deferred=False)
+            else:
+                for i in vehicles:
+                    results[i] = ChannelAllocation(i, transmitted=False, collision=True, deferred=False)
+        return results
+
+    # DSRC (CSMA/CA): probabilistic collision based on utilization + CW
+    cw_min = config.get("contention_window_min", 15)
+    utilization = compute_channel_utilization(n, vehicle_demands, rat)
+
+    results = []
+    for i in range(n):
+        if n <= 1:
+            p_coll = 0.0
+        else:
+            # Bianchi-inspired: prob at least one other picks same slot
+            p_coll = (1.0 - ((cw_min - 1) / cw_min) ** (n - 1)) * min(utilization, 1.0)
+            # When overloaded, collisions rise sharply
+            if utilization > 1.0:
+                p_coll = min(1.0, p_coll + (utilization - 1.0) * 0.3)
+        collided = rng.random() < p_coll
+        results.append(ChannelAllocation(i, transmitted=not collided, collision=collided, deferred=False))
+    return results
+
+
+def compute_contention_pdr(
+    base_pdr: float, utilization: float, rat: RATType, n_vehicles: int,
+) -> float:
+    """
+    Adjust PDR for multi-vehicle contention based on RAT access mechanism.
+
+    - 5G (scheduled): No PDR loss from contention (gNB manages resources).
+    - PC5 (SPS): Birthday-problem subchannel collision model.
+    - DSRC (CSMA/CA): Collision probability from CW and utilization.
+
+    Args:
+        base_pdr: PDR after packet-size correction (before contention)
+        utilization: Channel utilization ratio from compute_channel_utilization
+        rat: The RAT type
+        n_vehicles: Number of vehicles on this RAT
+
+    Returns:
+        Contention-adjusted PDR
+    """
+    if n_vehicles <= 1:
+        return base_pdr
+
+    config = get_phy_config(rat)
+
+    if rat.value == "5g":
+        # Scheduled access: no collision-based PDR loss
+        return base_pdr
+
+    if rat.value == "pc5":
+        # Birthday problem: P(no collision) = ((S-1)/S)^(N-1)
+        s = config.get("n_subchannels_total", 5)
+        p_no_collision = ((s - 1) / s) ** (n_vehicles - 1)
+        return base_pdr * p_no_collision
+
+    # DSRC (CSMA/CA)
+    cw_min = config.get("contention_window_min", 15)
+    p_success_slot = ((cw_min - 1) / cw_min) ** (n_vehicles - 1)
+    # Scale by utilization: at low utilization, contention is mild
+    p_success = p_success_slot ** min(utilization, 1.0)
+    # When overloaded, additional sharp degradation
+    if utilization > 1.0:
+        p_success *= max(0.1, 1.0 / utilization)
+    return base_pdr * p_success
+
+
+def compute_contention_latency(
+    base_latency: float, utilization: float, n_vehicles: int, rat: RATType,
+) -> float:
+    """
+    Add contention-induced latency based on RAT access mechanism.
+
+    - 5G (scheduled): Average scheduling queue delay.
+    - PC5 (SPS): Expected re-sensing delay on collision.
+    - DSRC (CSMA/CA): Backoff delay scaled by CW and utilization.
+
+    Args:
+        base_latency: Latency before contention effects (ms)
+        utilization: Channel utilization ratio
+        n_vehicles: Number of vehicles on this RAT
+        rat: The RAT type
+
+    Returns:
+        Latency with contention delay added (ms)
+    """
+    if n_vehicles <= 1:
+        return base_latency
+
+    config = get_phy_config(rat)
+
+    if rat.value == "5g":
+        # Average scheduling queue position: (N-1)/2 * per-UE delay
+        sched_delay = config.get("scheduling_delay_per_ue_ms", 0.5)
+        return base_latency + (n_vehicles - 1) * sched_delay / 2.0
+
+    if rat.value == "pc5":
+        # On collision, vehicle must re-sense for ~2 subframes
+        s = config.get("n_subchannels_total", 5)
+        p_collision = 1.0 - ((s - 1) / s) ** (n_vehicles - 1)
+        subframe_ms = config.get("subframe_duration_ms", 1.0)
+        return base_latency + p_collision * subframe_ms * 2.0
+
+    # DSRC (CSMA/CA): backoff grows with CW and utilization
+    cw_min = config.get("contention_window_min", 15)
+    slot_time_us = config.get("slot_time_us", 13)
+    slot_time_ms = slot_time_us / 1000.0
+    # Effective CW grows with number of vehicles and utilization
+    effective_cw = cw_min * max(1.0, utilization) * (1.0 + 0.1 * (n_vehicles - 1))
+    # Average backoff = CW/2 * slot_time
+    return base_latency + effective_cw * slot_time_ms / 2.0

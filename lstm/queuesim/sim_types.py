@@ -52,6 +52,15 @@ class SimulationMetrics:
     mean_tx_time_ms: float = 0.0
     capacity_limited_count: int = 0  # Packets capped at max TX capacity
 
+    # Per-RAT metrics
+    per_rat_max_queue_depth: Dict[RATType, int] = field(default_factory=dict)
+    per_rat_mean_queue_depth: Dict[RATType, float] = field(default_factory=dict)
+    per_rat_dropped_packets: Dict[RATType, int] = field(default_factory=dict)
+    per_rat_pdr: Dict[RATType, float] = field(default_factory=dict)
+    per_rat_mean_latency_ms: Dict[RATType, float] = field(default_factory=dict)
+    per_rat_max_latency_ms: Dict[RATType, float] = field(default_factory=dict)
+    per_rat_throughput_bps: Dict[RATType, float] = field(default_factory=dict)
+
     records: List[TransmissionRecord] = field(default_factory=list)
 
     @property
@@ -93,4 +102,11 @@ class SimulationMetrics:
             "mean_tx_time_ms": self.mean_tx_time_ms,
             "capacity_limited_count": self.capacity_limited_count,
             **{f"rat_{rat.value}_count": count for rat, count in self.rat_usage.items()},
+            **{f"max_queue_depth_{rat.value}": depth for rat, depth in self.per_rat_max_queue_depth.items()},
+            **{f"mean_queue_depth_{rat.value}": depth for rat, depth in self.per_rat_mean_queue_depth.items()},
+            **{f"dropped_packets_{rat.value}": count for rat, count in self.per_rat_dropped_packets.items()},
+            **{f"pdr_{rat.value}": val for rat, val in self.per_rat_pdr.items()},
+            **{f"mean_latency_ms_{rat.value}": val for rat, val in self.per_rat_mean_latency_ms.items()},
+            **{f"max_latency_ms_{rat.value}": val for rat, val in self.per_rat_max_latency_ms.items()},
+            **{f"throughput_bps_{rat.value}": val for rat, val in self.per_rat_throughput_bps.items()},
         }

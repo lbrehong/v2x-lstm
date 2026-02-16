@@ -149,8 +149,15 @@ def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
     scalers = create_all_scalers()
     gps_scaler = scalers['tx_latitude']
 
-    # Select only the columns needed for this RAT and remove incomplete rows
-    df = df[feature_cols].dropna().copy()
+    # Select only the columns needed for this RAT
+    df = df[feature_cols].copy()
+
+    # Replace RSRP sentinel values (16383 = modem error) with NaN before dropna
+    for rsrp_col in ("rsrp_1", "rsrp_2"):
+        if rsrp_col in df.columns:
+            df[rsrp_col] = df[rsrp_col].where(df[rsrp_col] <= 0)
+
+    df = df.dropna()
 
     # Filter out rows with default/invalid GPS coordinates
     df = df[~((df['tx_latitude'] == MIN_LAT) & (df['tx_longitude'] == MIN_LON))]

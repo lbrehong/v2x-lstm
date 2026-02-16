@@ -175,12 +175,12 @@ class TestRowToNetworkState:
             "timestamp_ms": 1699999999000,
             "latitude": 43.560,
             "longitude": 1.467,
-            "sinr": 320.0,
+            "sinr": 25.0,
             "rsrp": -95.0,
         })
         state = _row_to_network_state(row)
 
-        assert state.fiveg_sinr == 320.0
+        assert state.fiveg_sinr == 25.0
         assert state.fiveg_rsrp == -95.0
 
     def test_5g_signal_alternative_names(self):
@@ -189,12 +189,12 @@ class TestRowToNetworkState:
             "timestamp_ms": 1699999999000,
             "latitude": 43.560,
             "longitude": 1.467,
-            "fiveg_sinr": 320.0,
+            "fiveg_sinr": 25.0,
             "fiveg_rsrp": -95.0,
         })
         state = _row_to_network_state(row)
 
-        assert state.fiveg_sinr == 320.0
+        assert state.fiveg_sinr == 25.0
         assert state.fiveg_rsrp == -95.0
 
     def test_5g_latency_fallback(self):
@@ -279,7 +279,7 @@ class TestRowToNetworkState:
             # 5G
             "latency_ms_5g": 15.0,
             "pdr_5g": 0.995,
-            "sinr": 320.0,
+            "sinr": 25.0,
             "rsrp": -95.0,
         })
         state = _row_to_network_state(row)
@@ -296,7 +296,7 @@ class TestRowToNetworkState:
         assert state.pc5_pdr == 0.99
         assert state.fiveg_latency_ms == 15.0
         assert state.fiveg_pdr == 0.995
-        assert state.fiveg_sinr == 320.0
+        assert state.fiveg_sinr == 25.0
         assert state.fiveg_rsrp == -95.0
 
     def test_result_is_network_state(self):

@@ -109,13 +109,42 @@ class QueueSimulator:
 
         # Current state
         self.current_rat: Optional[RATType] = None
-        self.queue_depth = 0
-        self.queue_bytes = 0  # Track bytes in queue
+        self._queue_depth: Dict[RATType, int] = {
+            RATType.DSRC: 0, RATType.PC5: 0, RATType.FiveG: 0,
+        }
+        self._queue_bytes: Dict[RATType, int] = {
+            RATType.DSRC: 0, RATType.PC5: 0, RATType.FiveG: 0,
+        }
         self.recent_pdrs: List[float] = []
         self.pdr_window = 20  # Window for trend calculation
 
         # Metrics
         self.metrics = SimulationMetrics()
+
+    @property
+    def queue_depth(self) -> int:
+        """Aggregate queue depth across all RATs."""
+        return sum(self._queue_depth.values())
+
+    @queue_depth.setter
+    def queue_depth(self, value: int):
+        """Set aggregate queue depth (distributes to FiveG for backward compat)."""
+        # Clear all, set on FiveG — only used by legacy callers
+        for rat in self._queue_depth:
+            self._queue_depth[rat] = 0
+        self._queue_depth[RATType.FiveG] = value
+
+    @property
+    def queue_bytes(self) -> int:
+        """Aggregate queue bytes across all RATs."""
+        return sum(self._queue_bytes.values())
+
+    @queue_bytes.setter
+    def queue_bytes(self, value: int):
+        """Set aggregate queue bytes (distributes to FiveG for backward compat)."""
+        for rat in self._queue_bytes:
+            self._queue_bytes[rat] = 0
+        self._queue_bytes[RATType.FiveG] = value
 
     def get_queue_context(self) -> QueueContext:
         """
@@ -135,14 +164,18 @@ class QueueSimulator:
             else:
                 pdr_trend = 0.0
 
-        # Calculate urgency based on queue depth
-        urgency = min(1.0, self.queue_depth / 20.0)
+        # Calculate urgency based on max per-RAT queue depth
+        max_depth = max(self._queue_depth.values()) if self._queue_depth else 0
+        urgency = min(1.0, max_depth / 20.0)
 
         # Get current packet size
         if self.current_rat and self.current_rat in self.dtmc_sizers:
             avg_size = self.dtmc_sizers[self.current_rat].current_size
         else:
             avg_size = self.base_packet_size
+
+        # Build per-RAT queue depth dict
+        per_rat = {rat: depth for rat, depth in self._queue_depth.items() if depth > 0}
 
         return QueueContext(
             queue_depth=self.queue_depth,
@@ -151,6 +184,7 @@ class QueueSimulator:
             recent_pdr_trend=pdr_trend,
             target_latency_ms=self.target_latency_ms,
             target_pdr=self.target_pdr,
+            per_rat_queue_depth=per_rat,
         )
 
     def get_queue_capacity(self, rat: Optional[RATType] = None) -> int:
@@ -168,13 +202,13 @@ class QueueSimulator:
         packet_size = dtmc.current_size if dtmc else self.base_packet_size
         return get_queue_capacity_packets(target_rat, packet_size)
 
-    def can_enqueue(self, packet_size: int, rat: Optional[RATType] = None) -> bool:
+    def can_enqueue(self, packet_size: int, rat: RATType = RATType.FiveG) -> bool:
         """
-        Check if a packet can be added to the queue without overflow.
+        Check if a packet can be added to the per-RAT queue without overflow.
 
         Args:
             packet_size: Size of packet to enqueue
-            rat: RAT type (uses current_rat if None)
+            rat: RAT type for the target queue
 
         Returns:
             True if packet can be enqueued
@@ -182,40 +216,50 @@ class QueueSimulator:
         if not self.enforce_phy_limits:
             return True
 
-        target_rat = rat or self.current_rat or RATType.FiveG
-        capacity_bytes = calculate_queue_capacity_bytes(target_rat, get_tx_interval_ms(target_rat))
-        return (self.queue_bytes + packet_size) <= capacity_bytes
+        capacity_bytes = calculate_queue_capacity_bytes(rat, get_tx_interval_ms(rat))
+        return (self._queue_bytes.get(rat, 0) + packet_size) <= capacity_bytes
 
-    def enqueue(self, packet_size: int) -> bool:
+    def enqueue(self, packet_size: int, rat: RATType = RATType.FiveG) -> bool:
         """
-        Add a packet to the queue.
+        Add a packet to the per-RAT queue.
 
         Args:
             packet_size: Size of packet in bytes
+            rat: RAT type for the target queue
 
         Returns:
             True if packet was enqueued, False if dropped
         """
-        if not self.can_enqueue(packet_size):
+        if not self.can_enqueue(packet_size, rat):
             self.metrics.dropped_packets += 1
+            self.metrics.per_rat_dropped_packets[rat] = (
+                self.metrics.per_rat_dropped_packets.get(rat, 0) + 1
+            )
             return False
 
-        self.queue_depth += 1
-        self.queue_bytes += packet_size
+        self._queue_depth[rat] = self._queue_depth.get(rat, 0) + 1
+        self._queue_bytes[rat] = self._queue_bytes.get(rat, 0) + packet_size
+
+        # Update per-RAT and aggregate max queue depth
+        rat_depth = self._queue_depth[rat]
+        self.metrics.per_rat_max_queue_depth[rat] = max(
+            self.metrics.per_rat_max_queue_depth.get(rat, 0), rat_depth,
+        )
         self.metrics.max_queue_depth = max(
-            self.metrics.max_queue_depth, self.queue_depth
+            self.metrics.max_queue_depth, self.queue_depth,
         )
         return True
 
-    def dequeue(self, packet_size: int) -> None:
+    def dequeue(self, packet_size: int, rat: RATType = RATType.FiveG) -> None:
         """
-        Remove a packet from the queue.
+        Remove a packet from the per-RAT queue.
 
         Args:
             packet_size: Size of packet being dequeued
+            rat: RAT type for the target queue
         """
-        self.queue_depth = max(0, self.queue_depth - 1)
-        self.queue_bytes = max(0, self.queue_bytes - packet_size)
+        self._queue_depth[rat] = max(0, self._queue_depth.get(rat, 0) - 1)
+        self._queue_bytes[rat] = max(0, self._queue_bytes.get(rat, 0) - packet_size)
 
     def decide_packet_size(
         self,
@@ -311,8 +355,8 @@ class QueueSimulator:
         for dtmc in self.dtmc_sizers.values():
             dtmc.reset()
         self.current_rat = None
-        self.queue_depth = 0
-        self.queue_bytes = 0
+        self._queue_depth = {RATType.DSRC: 0, RATType.PC5: 0, RATType.FiveG: 0}
+        self._queue_bytes = {RATType.DSRC: 0, RATType.PC5: 0, RATType.FiveG: 0}
         self.recent_pdrs = []
         self.metrics = SimulationMetrics()
 
@@ -486,8 +530,8 @@ class IntegratedQueueSimulator:
 
         return success, latency, tx_time_ms
 
-    def _packet_generator(self, env: simpy.Environment, queue: simpy.Store):
-        """SimPy process: Generate packets at specified rate with bounded queue."""
+    def _packet_generator(self, env: simpy.Environment, arrival_queue: simpy.Store):
+        """SimPy process: Generate packets at specified rate into arrival queue."""
         interval = 1.0 / self.arrival_rate_hz
         packet_id = 0
 
@@ -496,45 +540,24 @@ class IntegratedQueueSimulator:
             if self._stop_simulation:
                 break
 
-            # Estimate packet size for queue capacity check
-            estimated_size = self.base_packet_size
-
-            # Check if packet can be enqueued (bounded queue)
-            if self.enforce_phy_limits and not self.queue_sim.can_enqueue(estimated_size):
-                self.queue_sim.metrics.dropped_packets += 1
-                packet_id += 1
-                continue
-
             packet = {
                 "arrival_time": env.now,
                 "id": packet_id,
-                "estimated_size": estimated_size,
             }
-            yield queue.put(packet)
-            self.queue_sim.queue_depth += 1
-            self.queue_sim.queue_bytes += estimated_size
-            self.queue_sim.metrics.max_queue_depth = max(
-                self.queue_sim.metrics.max_queue_depth,
-                self.queue_sim.queue_depth,
-            )
+            yield arrival_queue.put(packet)
             packet_id += 1
 
-    def _packet_processor(self, env: simpy.Environment, queue: simpy.Store):
-        """SimPy process: Process packets from queue with PHY-layer modeling."""
+    def _router(self, env: simpy.Environment, arrival_queue: simpy.Store):
+        """SimPy process: Route packets to per-RAT queues after RAT selection + sizing."""
         previous_rat = None
-        tx_times: List[float] = []
 
         while True:
-            # Wait for packet
-            packet = yield queue.get()
-            estimated_size = packet.get("estimated_size", self.base_packet_size)
-            self.queue_sim.queue_depth = max(0, self.queue_sim.queue_depth - 1)
-            self.queue_sim.queue_bytes = max(0, self.queue_sim.queue_bytes - estimated_size)
+            # Wait for packet from arrival queue
+            packet = yield arrival_queue.get()
 
             # Get network state
             state = self._get_network_state(env.now)
             if state is None:
-                # No more data, signal stop and exit
                 self._stop_simulation = True
                 break
 
@@ -550,6 +573,59 @@ class IntegratedQueueSimulator:
             # Get packet size decision (uses moving window PDR from actual outcomes)
             packet_decision = self.queue_sim.decide_packet_size(rat_decision, env.now)
             packet_size = packet_decision.packet_size_bytes
+
+            # Try to enqueue into per-RAT queue
+            if not self.queue_sim.enqueue(packet_size, selected_rat):
+                # Queue full — record as a dropped/failed transmission
+                metrics = self.queue_sim.metrics
+                metrics.total_packets += 1
+                metrics.failed_packets += 1
+
+                # Feed drop to DTMC so PDR degrades naturally
+                outcome = TransmissionOutcome(
+                    timestamp_ms=int(env.now * 1000),
+                    rat_used=selected_rat,
+                    packet_size_bytes=packet_size,
+                    actual_latency_ms=0.0,
+                    delivered=False,
+                    network_state=state,
+                )
+                self.queue_sim.update_pdr_estimate(outcome)
+
+                # Track RAT usage even for drops
+                metrics.rat_usage[selected_rat] = metrics.rat_usage.get(selected_rat, 0) + 1
+                continue
+
+            # Attach routing info and put into per-RAT SimPy store
+            packet["rat"] = selected_rat
+            packet["packet_size"] = packet_size
+            packet["rat_decision"] = rat_decision
+            packet["network_state"] = state
+            yield self.rat_queues[selected_rat].put(packet)
+
+    def _rat_processor(self, env: simpy.Environment, rat: RATType):
+        """SimPy process: Process packets from a single RAT's queue."""
+        rat_queue = self.rat_queues[rat]
+        tx_times: List[float] = []
+
+        while True:
+            # Check termination: router done and queue empty
+            if self._stop_simulation and len(rat_queue.items) == 0:
+                break
+
+            # Try to get a packet with a short timeout to allow checking _stop_simulation
+            try:
+                packet = yield rat_queue.get()
+            except simpy.Interrupt:
+                break
+
+            packet_size = packet["packet_size"]
+            rat_decision = packet["rat_decision"]
+            state = packet["network_state"]
+            selected_rat = packet["rat"]
+
+            # Dequeue from per-RAT tracking
+            self.queue_sim.dequeue(packet_size, selected_rat)
 
             # Simulate transmission with PHY-layer model
             success, latency, tx_time = self._simulate_transmission(
@@ -582,9 +658,7 @@ class IntegratedQueueSimulator:
                 metrics.failed_packets += 1
 
             # Track RAT usage
-            if selected_rat not in metrics.rat_usage:
-                metrics.rat_usage[selected_rat] = 0
-            metrics.rat_usage[selected_rat] += 1
+            metrics.rat_usage[selected_rat] = metrics.rat_usage.get(selected_rat, 0) + 1
 
             # Get DTMC state for this RAT
             dtmc = self.queue_sim.dtmc_sizers.get(selected_rat)
@@ -606,7 +680,7 @@ class IntegratedQueueSimulator:
                 corrected_pdr=corrected_pdr,
                 success=success,
                 latency_ms=latency,
-                queue_depth=self.queue_sim.queue_depth,
+                queue_depth=self.queue_sim._queue_depth.get(selected_rat, 0),
                 dtmc_state=dtmc_state,
             )
             metrics.records.append(record)
@@ -622,18 +696,17 @@ class IntegratedQueueSimulator:
                 "success": success,
                 "latency_ms": latency,
                 "tx_time_ms": tx_time,
-                "queue_depth": self.queue_sim.queue_depth,
+                "queue_depth": self.queue_sim._queue_depth.get(selected_rat, 0),
                 "dtmc_state": dtmc_state,
                 "latitude": state.latitude,
                 "longitude": state.longitude,
             })
 
-            # Simulate transmission delay
+            # Simulate transmission delay (independent per RAT)
             yield env.timeout(latency / 1000.0)
 
-        # Update mean TX time
-        if tx_times:
-            self.queue_sim.metrics.mean_tx_time_ms = float(np.mean(tx_times))
+        # Store tx_times for this RAT processor
+        self._tx_times.extend(tx_times)
 
     def run(
         self,
@@ -655,6 +728,7 @@ class IntegratedQueueSimulator:
         self.data_index = 0
         self.results = []
         self._stop_simulation = False
+        self._tx_times: List[float] = []
 
         # Determine run length
         if duration is None and max_packets is None:
@@ -670,17 +744,25 @@ class IntegratedQueueSimulator:
 
         # Create SimPy environment
         self.env = simpy.Environment()
-        queue = simpy.Store(self.env)
+        arrival_queue = simpy.Store(self.env)
 
-        # Start processes
-        self.env.process(self._packet_generator(self.env, queue))
-        self.env.process(self._packet_processor(self.env, queue))
+        # Per-RAT SimPy stores
+        self.rat_queues: Dict[RATType, simpy.Store] = {
+            RATType.DSRC: simpy.Store(self.env),
+            RATType.PC5: simpy.Store(self.env),
+            RATType.FiveG: simpy.Store(self.env),
+        }
+
+        # Start processes: 1 generator, 1 router, 3 per-RAT processors
+        self.env.process(self._packet_generator(self.env, arrival_queue))
+        self.env.process(self._router(self.env, arrival_queue))
+        for rat in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
+            self.env.process(self._rat_processor(self.env, rat))
 
         # Run simulation
         if duration is not None:
             self.env.run(until=duration)
         else:
-            # Run until data exhausted (processor will break)
             try:
                 self.env.run()
             except simpy.core.StopSimulation:
@@ -695,6 +777,36 @@ class IntegratedQueueSimulator:
             metrics.mean_queue_depth = np.mean([r.queue_depth for r in metrics.records])
             metrics.mean_packet_size = np.mean([r.packet_size for r in metrics.records])
 
+            # Compute per-RAT metrics from records
+            from collections import defaultdict
+            rat_records: Dict[RATType, List[TransmissionRecord]] = defaultdict(list)
+            for r in metrics.records:
+                rat_records[r.rat].append(r)
+
+            for rat, recs in rat_records.items():
+                # Per-RAT mean queue depth
+                metrics.per_rat_mean_queue_depth[rat] = float(
+                    np.mean([r.queue_depth for r in recs])
+                )
+                # Per-RAT PDR
+                total = len(recs)
+                successful = sum(1 for r in recs if r.success)
+                metrics.per_rat_pdr[rat] = successful / total if total > 0 else 0.0
+                # Per-RAT latency
+                rat_latencies = [r.latency_ms for r in recs]
+                metrics.per_rat_mean_latency_ms[rat] = float(np.mean(rat_latencies))
+                metrics.per_rat_max_latency_ms[rat] = float(max(rat_latencies))
+                # Per-RAT throughput (successful bytes / duration)
+                successful_bytes = sum(r.packet_size for r in recs if r.success)
+                duration = recs[-1].timestamp - recs[0].timestamp if len(recs) > 1 else 0.0
+                metrics.per_rat_throughput_bps[rat] = (
+                    successful_bytes / duration if duration > 0 else 0.0
+                )
+
+        # Mean TX time
+        if self._tx_times:
+            metrics.mean_tx_time_ms = float(np.mean(self._tx_times))
+
         # DTMC statistics
         for dtmc in self.queue_sim.dtmc_sizers.values():
             stats = dtmc.get_statistics()
@@ -704,8 +816,11 @@ class IntegratedQueueSimulator:
         return metrics
 
     def get_results_dataframe(self) -> pd.DataFrame:
-        """Get simulation results as DataFrame."""
-        return pd.DataFrame(self.results)
+        """Get simulation results as DataFrame, sorted by timestamp."""
+        df = pd.DataFrame(self.results)
+        if not df.empty and "timestamp" in df.columns:
+            df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
 
     def save_results(self, output_path: str):
         """Save results to CSV."""
@@ -777,10 +892,16 @@ def run_standalone(
     print(f"Capacity limited:  {metrics.capacity_limited_count}")
     print(f"DTMC increases:    {metrics.dtmc_increases}")
     print(f"DTMC decreases:    {metrics.dtmc_decreases}")
-    print("\nRAT usage:")
+    print("\nPer-RAT breakdown:")
     for rat, count in metrics.rat_usage.items():
         pct = count / metrics.total_packets * 100 if metrics.total_packets > 0 else 0
-        print(f"  {rat.value}: {count} ({pct:.1f}%)")
+        pdr_r = metrics.per_rat_pdr.get(rat, 0)
+        lat_r = metrics.per_rat_mean_latency_ms.get(rat, 0)
+        thr_r = metrics.per_rat_throughput_bps.get(rat, 0)
+        drop_r = metrics.per_rat_dropped_packets.get(rat, 0)
+        print(f"  {rat.value:>4s}: {count:4d} pkts ({pct:5.1f}%)  "
+              f"PDR={pdr_r:.4f}  latency={lat_r:.2f}ms  "
+              f"throughput={thr_r:.0f} Bps  drops={drop_r}")
     print("=" * 60)
 
     # Save results

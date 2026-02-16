@@ -36,7 +36,10 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from api_types import RATType, NetworkState, TransmissionOutcome
+from api_types import (
+    RATType, NetworkState, TransmissionOutcome,
+    RATDecision, PacketSizeDecision,
+)
 from config import (
     TIMESTEPS, MODEL_DIR, OUTPUT_DIR,
     create_latency_scaler,
@@ -45,7 +48,10 @@ from utils import row_to_network_state, ensure_dir_exists
 from selection.api import RATSelectionAPI
 from queuesim.queue_simulator import QueueSimulator
 from queuesim.dtmc_sizer import correct_pdr_for_packet_size
-from queuesim.phy_layer import calculate_tx_time_ms, get_base_latency_ms
+from queuesim.phy_layer import (
+    calculate_tx_time_ms, get_base_latency_ms,
+    compute_channel_utilization, compute_contention_pdr, compute_contention_latency,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,22 +109,8 @@ def _simulate_tx(
 
 
 # ---------------------------------------------------------------------------
-# Multi-vehicle contention model
+# Multi-vehicle contention model (RB-consumption based)
 # ---------------------------------------------------------------------------
-
-# PDR penalty per additional vehicle sharing the same RAT
-PDR_PENALTY = {
-    RATType.FiveG: 0.01,   # scheduled access, minimal collision
-    RATType.PC5: 0.03,     # semi-persistent sensing, moderate collision
-    RATType.DSRC: 0.04,    # CSMA/CA contention, highest collision risk
-}
-
-# Latency increase factor per additional vehicle
-LATENCY_DELAY_FACTOR = {
-    RATType.FiveG: 0.05,
-    RATType.PC5: 0.08,
-    RATType.DSRC: 0.12,
-}
 
 # Per-vehicle signal noise standard deviations
 SIGNAL_NOISE_STD = {
@@ -127,26 +119,6 @@ SIGNAL_NOISE_STD = {
     "sinr": 3.0,
     "rsrp": 2.0,
 }
-
-
-def _apply_pdr_contention(base_pdr: float, n_vehicles: int, rat: RATType) -> float:
-    """Degrade PDR based on number of vehicles sharing the same RAT."""
-    if n_vehicles <= 1:
-        return base_pdr
-    penalty = PDR_PENALTY.get(rat, 0.03)
-    contention_factor = max(0.5, 1.0 - (n_vehicles - 1) * penalty)
-    return base_pdr * contention_factor
-
-
-def _apply_latency_contention(
-    base_latency: float, n_vehicles: int, rat: RATType,
-) -> float:
-    """Increase latency based on number of vehicles sharing the same RAT."""
-    if n_vehicles <= 1:
-        return base_latency
-    delay_factor = LATENCY_DELAY_FACTOR.get(rat, 0.08)
-    contention_delay = base_latency * (n_vehicles - 1) * delay_factor
-    return base_latency + contention_delay
 
 
 def _perturb_state(
@@ -185,17 +157,24 @@ def _simulate_tx_with_contention(
     base_packet_size: int,
     correction_exponent: float,
     n_vehicles_on_rat: int,
+    utilization: float,
 ) -> Tuple[bool, float, float]:
-    """Simulate TX with contention effects.  Returns (delivered, latency_ms, corrected_pdr)."""
-    # Base simulation (same as _simulate_tx)
+    """Simulate TX with RB-based contention effects.
+
+    Returns (delivered, latency_ms, contended_pdr).
+    """
+    # 1. Packet-size correction (same as _simulate_tx)
     corrected_pdr = correct_pdr_for_packet_size(
         predicted_pdr, base_packet_size, packet_size, correction_exponent,
     )
 
-    # Apply contention to PDR
-    contended_pdr = _apply_pdr_contention(corrected_pdr, n_vehicles_on_rat, rat)
+    # 2. RB-based contention PDR
+    contended_pdr = compute_contention_pdr(
+        corrected_pdr, utilization, rat, n_vehicles_on_rat,
+    )
     delivered = random.random() < contended_pdr
 
+    # 3. Base latency with jitter (same as _simulate_tx)
     tx_time = calculate_tx_time_ms(packet_size, rat)
     base_lat = get_base_latency_ms(rat)
 
@@ -207,8 +186,10 @@ def _simulate_tx_with_contention(
     size_factor = packet_size / base_packet_size
     base_latency = (base_lat + tx_time) * jitter * (0.95 + 0.1 * size_factor)
 
-    # Apply contention to latency
-    latency = _apply_latency_contention(base_latency, n_vehicles_on_rat, rat)
+    # 4. RB-based contention latency
+    latency = compute_contention_latency(
+        base_latency, utilization, n_vehicles_on_rat, rat,
+    )
     return delivered, latency, contended_pdr
 
 
@@ -608,22 +589,34 @@ def run_multi_vehicle_loop(
                 decision, sim_time,
             )
 
-        # Phase 2: Count vehicles per RAT
+        # Phase 2: Count vehicles per RAT and compute channel utilization
         active_rats = [r for r in vehicle_rats if r is not None]
         vehicles_per_rat = Counter(active_rats)
+
+        # Collect packet sizes per RAT for utilization computation
+        packets_per_rat: Dict[RATType, List[int]] = {}
+        for v in range(num_vehicles):
+            if vehicle_rats[v] is not None and pkt_decisions[v] is not None:
+                packets_per_rat.setdefault(vehicle_rats[v], []).append(
+                    pkt_decisions[v].packet_size_bytes,
+                )
+
+        utilization_per_rat: Dict[RATType, float] = {}
+        for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
+            pkts = packets_per_rat.get(rat_enum, [])
+            n = vehicles_per_rat.get(rat_enum, 0)
+            utilization_per_rat[rat_enum] = compute_channel_utilization(
+                n, pkts, rat_enum,
+            )
 
         # Log contention for this time step
         contention_entry = {"idx": idx, "sim_time": round(sim_time, 4)}
         for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
-            n = vehicles_per_rat.get(rat_enum, 0)
             rstr = RAT_STR[rat_enum]
-            contention_entry[f"n_{rstr}"] = n
-            if n > 0:
-                contention_entry[f"pdr_factor_{rstr}"] = round(
-                    max(0.5, 1.0 - (n - 1) * PDR_PENALTY[rat_enum]), 4,
-                )
-            else:
-                contention_entry[f"pdr_factor_{rstr}"] = 1.0
+            contention_entry[f"n_{rstr}"] = vehicles_per_rat.get(rat_enum, 0)
+            contention_entry[f"utilization_{rstr}"] = round(
+                utilization_per_rat[rat_enum], 6,
+            )
         contention_log.append(contention_entry)
 
         # Phase 3: Simulate TX with contention
@@ -645,9 +638,10 @@ def run_multi_vehicle_loop(
             vehicle_prev_rat[v] = selected_rat
 
             # Simulate with contention
+            utilization = utilization_per_rat[selected_rat]
             delivered, sim_latency, contended_pdr = _simulate_tx_with_contention(
                 selected_rat, packet_size, decision.predicted_pdr,
-                base_packet_size, correction_exponent, n_on_rat,
+                base_packet_size, correction_exponent, n_on_rat, utilization,
             )
 
             # Feed outcome to this vehicle's queue simulator
@@ -704,7 +698,8 @@ def run_multi_vehicle_loop(
                 "delivered": delivered,
                 "packet_size": packet_size,
                 "corrected_pdr": round(contended_pdr, 4),
-                "contention_level": n_on_rat,
+                "contention_n_vehicles": n_on_rat,
+                "contention_utilization": round(utilization, 6),
                 "dtmc_state": dtmc_state,
                 "dtmc_size": dtmc_size,
                 "confidence": round(decision.confidence, 4),

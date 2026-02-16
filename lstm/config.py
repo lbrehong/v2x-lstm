@@ -15,10 +15,10 @@ MIN_LON, MAX_LON = 1.463952, 1.472176
 # =============================================================================
 # Signal Quality Bounds
 # =============================================================================
-MIN_LATENCY, MAX_LATENCY = 4, 50  # in ms
+MIN_LATENCY, MAX_LATENCY = 0, 300  # in ms (covers 5G p95≈391, DSRC 0-19, PC5 5-93)
 MIN_PDR, MAX_PDR = 0.0, 1.0
 MIN_THROUGHPUT, MAX_THROUGHPUT = 0, 100  # in Mbps
-MIN_SINR_5G, MAX_SINR_5G = 200, 375
+MIN_SINR_5G, MAX_SINR_5G = -10, 45  # standard 3GPP SINR in dB
 MIN_RSRP_5G, MAX_RSRP_5G = -127, -67
 MIN_RSRP_DSRC, MAX_RSRP_DSRC = -150, -45
 
@@ -110,6 +110,8 @@ RAT_PHY_CONFIG = {
         "base_latency_ms": 15.0,         # Typical E2E latency
         # Queue (2 TX intervals buffer)
         "queue_multiplier": 2,
+        # Contention parameters
+        "scheduling_delay_per_ue_ms": 0.5,  # Per-UE scheduling overhead
     },
     # C-V2X PC5 Mode 4 (LTE Sidelink)
     # 1 RB = 12 subcarriers × 14 symbols per subframe (2 slots × 7 symbols)
@@ -120,7 +122,8 @@ RAT_PHY_CONFIG = {
         "n_subcarriers": 12,             # NSC: fixed by LTE spec
         "n_symbols": 14,                 # Nsym: symbols per subframe (2 slots × 7)
         "n_rbs_per_subchannel": 10,      # RBs per subchannel (configurable)
-        "n_subchannels": 1,              # Configurable: 1-2 subchannels typical
+        "n_subchannels": 1,              # Subchannels per vehicle (1 typical)
+        "n_subchannels_total": 5,        # Total subchannel pool (50 RBs / 10 per subchannel)
         "modulation_order": 2,           # Rmod: QPSK (default, conservative for V2X)
         "coding_rate": 0.5,              # CR: 0.5 (high reliability mode)
         # Timing
@@ -145,6 +148,7 @@ RAT_PHY_CONFIG = {
         # Contention parameters
         "contention_window_min": 15,     # 802.11p CWmin
         "contention_window_max": 1023,   # 802.11p CWmax
+        "slot_time_us": 13,              # 802.11p slot time (μs)
         # Queue (2 TX intervals buffer)
         "queue_multiplier": 2,
     },
@@ -245,7 +249,7 @@ def create_sinr_5g_scaler():
     """
     Create 5G SINR scaler for signal quality normalization.
 
-    SINR values from 5G modem are in proprietary units (200-375).
+    SINR in standard 3GPP dB units (-10 to 45 dB).
 
     Returns:
         Fitted MinMaxScaler for 5G SINR values
