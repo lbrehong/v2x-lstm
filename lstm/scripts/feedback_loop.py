@@ -210,17 +210,35 @@ def _retrain_model(
     model = api.models[rat_str]
 
     # Evaluate loss before retraining
+    # Returns [total_loss, latency_loss, pdr_loss, latency_rmse, pdr_rmse]
     y_dict = {"latency_ms": y_latency, "pdr": y_pdr}
-    loss_before = model.evaluate(x_buffer, y_dict, verbose=0)
-    # model.evaluate returns [total_loss, latency_loss, pdr_loss, latency_rmse, pdr_rmse]
-    total_loss_before = loss_before[0] if isinstance(loss_before, list) else loss_before
+    eval_before = model.evaluate(x_buffer, y_dict, verbose=0)
+    if not isinstance(eval_before, list):
+        eval_before = [eval_before, None, None, None, None]
 
-    # Retrain for 1 epoch
+    # Retrain for 1 epoch with validation split
+    lr_before = float(model.optimizer.learning_rate)
+    t0 = time.time()
     history = model.fit(
         x_buffer, y_dict,
-        epochs=1, batch_size=32, verbose=0,
+        epochs=1, batch_size=32, verbose=1,
+        validation_split=0.15,
     )
-    total_loss_after = history.history["loss"][0]
+    train_time_s = time.time() - t0
+    h = history.history
+
+    # Prediction accuracy snapshot (MAE in real units)
+    preds = model.predict(x_buffer, verbose=0)
+    pred_latency_norm = preds[0].flatten()
+    pred_pdr = preds[1].flatten()
+    # Denormalize latency predictions and targets
+    lat_scaler = api.latency_scaler
+    pred_latency_ms = lat_scaler.inverse_transform(
+        pred_latency_norm.reshape(-1, 1)).flatten()
+    actual_latency_ms = lat_scaler.inverse_transform(
+        y_latency.reshape(-1, 1)).flatten()
+    latency_mae_ms = float(np.mean(np.abs(pred_latency_ms - actual_latency_ms)))
+    pdr_mae = float(np.mean(np.abs(pred_pdr - y_pdr)))
 
     # Save checkpoint
     save_path = os.path.join(
@@ -233,14 +251,37 @@ def _retrain_model(
         "cycle": cycle,
         "rat": rat_str,
         "n_samples": len(x_buffer),
-        "loss_before": total_loss_before,
-        "loss_after": total_loss_after,
+        "train_time_s": round(train_time_s, 4),
+        "learning_rate": lr_before,
+        # Before-retrain metrics
+        "loss_before": eval_before[0],
+        "latency_loss_before": eval_before[1],
+        "pdr_loss_before": eval_before[2],
+        "latency_rmse_before": eval_before[3],
+        "pdr_rmse_before": eval_before[4],
+        # After-retrain training metrics
+        "loss_after": h["loss"][0],
+        "latency_loss_after": h["latency_ms_loss"][0],
+        "pdr_loss_after": h["pdr_loss"][0],
+        "latency_rmse_after": h["latency_ms_rmse"][0],
+        "pdr_rmse_after": h["pdr_rmse"][0],
+        # After-retrain validation metrics
+        "val_loss": h.get("val_loss", [None])[0],
+        "val_latency_loss": h.get("val_latency_ms_loss", [None])[0],
+        "val_pdr_loss": h.get("val_pdr_loss", [None])[0],
+        "val_latency_rmse": h.get("val_latency_ms_rmse", [None])[0],
+        "val_pdr_rmse": h.get("val_pdr_rmse", [None])[0],
+        # Prediction accuracy (real units)
+        "latency_mae_ms": round(latency_mae_ms, 4),
+        "pdr_mae": round(pdr_mae, 6),
         "model_path": save_path,
     })
     print(
         f"  Retrained {api.model_type}_{rat_str}: "
-        f"loss {total_loss_before:.5f} -> {total_loss_after:.5f}  "
-        f"({len(x_buffer)} samples, cycle {cycle})"
+        f"loss {eval_before[0]:.5f} -> {h['loss'][0]:.5f}  "
+        f"(val_loss={h.get('val_loss', [None])[0]:.5f}, "
+        f"lat_mae={latency_mae_ms:.2f}ms, pdr_mae={pdr_mae:.4f})  "
+        f"({len(x_buffer)} samples, cycle {cycle}, {train_time_s:.2f}s)"
     )
 
 
@@ -287,6 +328,7 @@ def run_feedback_loop(
 
     # Simulated time (seconds, incremented by TX_INTERVAL)
     sim_time = 0.0
+    successful_bytes = 0
     previous_rat: Optional[RATType] = None
     rat_switches = 0
 
@@ -337,6 +379,7 @@ def run_feedback_loop(
         qsim.metrics.total_packets += 1
         if delivered:
             qsim.metrics.successful_packets += 1
+            successful_bytes += packet_size
 
         # 6. Capture sequence + ground-truth target for retraining
         history = api._history[rat_str]
@@ -437,6 +480,27 @@ def run_feedback_loop(
             for k, v in stats.items():
                 dtmc_stats[f"dtmc_{rat_enum.value}_{k}"] = v
 
+    # DTMC transition log
+    dtmc_rows = []
+    for rat_enum, dtmc in qsim.dtmc_sizers.items():
+        for step, state, pdr, action in dtmc.history:
+            dtmc_rows.append({
+                "rat": rat_enum.value,
+                "step": step,
+                "state": state,
+                "packet_size": int(dtmc.size_levels[state]),
+                "pdr": round(pdr, 6),
+                "action": action,
+            })
+    if dtmc_rows:
+        dtmc_path = os.path.join(OUTPUT_DIR, "feedback_dtmc_transitions.csv")
+        pd.DataFrame(dtmc_rows).to_csv(dtmc_path, index=False)
+        print(f"DTMC transitions saved to {dtmc_path}")
+
+    # Throughput
+    duration_s = sim_time if sim_time > 0 else 1.0
+    throughput_bps = successful_bytes / duration_s
+
     # Summary
     total = qsim.metrics.total_packets
     success = qsim.metrics.successful_packets
@@ -444,6 +508,7 @@ def run_feedback_loop(
     log_df = pd.DataFrame(row_log)
 
     rat_dist = log_df["selected_rat"].value_counts().to_dict() if len(log_df) else {}
+    mean_pkt = log_df["packet_size"].mean() if len(log_df) else 0
 
     summary = {
         "input_file": input_csv,
@@ -455,6 +520,9 @@ def run_feedback_loop(
         "achieved_pdr": round(achieved_pdr, 4),
         "mean_sim_latency": round(log_df["sim_latency"].mean(), 4) if len(log_df) else 0,
         "mean_pred_latency": round(log_df["pred_latency"].mean(), 4) if len(log_df) else 0,
+        "successful_bytes": successful_bytes,
+        "throughput_bytes_per_s": round(throughput_bps, 4),
+        "mean_packet_size": round(mean_pkt, 4),
         "rat_switches": rat_switches,
         "retrain_cycles_total": sum(retrain_count.values()),
         **{f"retrain_{k}": v for k, v in retrain_count.items()},
@@ -473,6 +541,8 @@ def run_feedback_loop(
     print(f"  Achieved PDR:          {achieved_pdr:.4f}")
     print(f"  Mean sim latency:      {summary['mean_sim_latency']:.2f} ms")
     print(f"  Mean pred latency:     {summary['mean_pred_latency']:.2f} ms")
+    print(f"  Throughput:            {throughput_bps:.2f} bytes/s  ({successful_bytes} bytes)")
+    print(f"  Mean packet size:      {mean_pkt:.0f} bytes")
     print(f"  RAT switches:          {rat_switches}")
     print(f"  Retrain cycles:        {sum(retrain_count.values())} "
           f"(dsrc={retrain_count['dsrc']}, pc5={retrain_count['pc5']}, 5g={retrain_count['5g']})")
@@ -547,9 +617,11 @@ def run_multi_vehicle_loop(
     # Global TX counters
     total_packets = 0
     successful_packets = 0
+    successful_bytes = 0
     # Per-vehicle counters
     vehicle_packets = [0] * num_vehicles
     vehicle_success = [0] * num_vehicles
+    vehicle_bytes = [0] * num_vehicles
     vehicle_switches = [0] * num_vehicles
     vehicle_prev_rat: List[Optional[RATType]] = [None] * num_vehicles
 
@@ -662,7 +734,9 @@ def run_multi_vehicle_loop(
             vehicle_packets[v] += 1
             if delivered:
                 successful_packets += 1
+                successful_bytes += packet_size
                 vehicle_success[v] += 1
+                vehicle_bytes[v] += packet_size
 
             # Build retraining sequence from this vehicle's history
             history = vehicle_histories[v].get(rat_str, [])
@@ -751,6 +825,29 @@ def run_multi_vehicle_loop(
     pd.DataFrame(contention_log).to_csv(ct_path, index=False)
     print(f"Contention log saved to {ct_path}")
 
+    # DTMC transition log (all vehicles)
+    dtmc_rows = []
+    for v in range(num_vehicles):
+        for rat_enum, dtmc in vehicle_qsims[v].dtmc_sizers.items():
+            for step, state, pdr, action in dtmc.history:
+                dtmc_rows.append({
+                    "vehicle_id": v,
+                    "rat": rat_enum.value,
+                    "step": step,
+                    "state": state,
+                    "packet_size": int(dtmc.size_levels[state]),
+                    "pdr": round(pdr, 6),
+                    "action": action,
+                })
+    if dtmc_rows:
+        dtmc_path = os.path.join(OUTPUT_DIR, "feedback_multi_dtmc_transitions.csv")
+        pd.DataFrame(dtmc_rows).to_csv(dtmc_path, index=False)
+        print(f"DTMC transitions saved to {dtmc_path}")
+
+    # Throughput
+    duration_s = sim_time if sim_time > 0 else 1.0
+    throughput_bps = successful_bytes / duration_s
+
     # Per-vehicle stats
     achieved_pdr = successful_packets / total_packets if total_packets else 0
     log_df = pd.DataFrame(row_log)
@@ -760,6 +857,8 @@ def run_multi_vehicle_loop(
     for v in range(num_vehicles):
         vpdr = vehicle_success[v] / vehicle_packets[v] if vehicle_packets[v] else 0
         v_df = log_df[log_df["vehicle_id"] == v] if len(log_df) else pd.DataFrame()
+        v_duration = duration_s  # all vehicles share same time window
+        v_throughput = vehicle_bytes[v] / v_duration
         per_vehicle_rows.append({
             "vehicle_id": v,
             "total_packets": vehicle_packets[v],
@@ -767,6 +866,8 @@ def run_multi_vehicle_loop(
             "achieved_pdr": round(vpdr, 4),
             "mean_sim_latency": round(v_df["sim_latency"].mean(), 4) if len(v_df) else 0,
             "rat_switches": vehicle_switches[v],
+            "successful_bytes": vehicle_bytes[v],
+            "throughput_bytes_per_s": round(v_throughput, 4),
         })
 
     # DTMC stats (aggregate across all vehicles)
@@ -792,6 +893,8 @@ def run_multi_vehicle_loop(
         "achieved_pdr": round(achieved_pdr, 4),
         "mean_sim_latency": round(log_df["sim_latency"].mean(), 4) if len(log_df) else 0,
         "mean_pred_latency": round(log_df["pred_latency"].mean(), 4) if len(log_df) else 0,
+        "successful_bytes": successful_bytes,
+        "throughput_bytes_per_s": round(throughput_bps, 4),
         "total_rat_switches": sum(vehicle_switches),
         "retrain_cycles_total": sum(retrain_count.values()),
         **{f"retrain_{k}": v for k, v in retrain_count.items()},
@@ -816,6 +919,7 @@ def run_multi_vehicle_loop(
     print(f"  Achieved PDR:          {achieved_pdr:.4f}")
     print(f"  Mean sim latency:      {summary['mean_sim_latency']:.2f} ms")
     print(f"  Mean pred latency:     {summary['mean_pred_latency']:.2f} ms")
+    print(f"  Throughput:            {throughput_bps:.2f} bytes/s  ({successful_bytes} bytes)")
     print(f"  Total RAT switches:    {sum(vehicle_switches)}")
     print(f"  Retrain cycles:        {sum(retrain_count.values())} "
           f"(dsrc={retrain_count['dsrc']}, pc5={retrain_count['pc5']}, 5g={retrain_count['5g']})")
