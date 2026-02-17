@@ -133,9 +133,10 @@ def stage_trim(args) -> None:
         print(f"Raw logs:       {RAW}")
         print(f"Trimmed output: {OUT}")
 
-    files_dsrc = find_files_with_string(RAW, "dsrc")
-    files_pc5 = find_files_with_string(RAW, "pc5")
-    files_5g = find_files_with_string(RAW, "5g")
+    # Raw logs are not CSVs; exclude pipeline outputs that may be in the same dir
+    files_dsrc = [f for f in find_files_with_string(RAW, "dsrc") if not f.endswith(".csv")]
+    files_pc5 = [f for f in find_files_with_string(RAW, "pc5") if not f.endswith(".csv")]
+    files_5g = [f for f in find_files_with_string(RAW, "5g") if not f.endswith(".csv")]
     print("Matching DSRC files: ", files_dsrc)
     print("Matching PC5 files: ", files_pc5)
     print("Matching 5G files: ", files_5g)

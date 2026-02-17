@@ -24,8 +24,7 @@ def find_files_with_string(directory: str, search_string: str) -> List[str]:
         List of matching filenames (not full paths)
     """
     all_files = os.listdir(directory)
-    matching_files = [f for f in all_files
-                      if search_string in f and not f.endswith(".csv")]
+    matching_files = [f for f in all_files if search_string in f]
     return matching_files
 
 
