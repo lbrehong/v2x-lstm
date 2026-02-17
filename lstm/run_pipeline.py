@@ -5,8 +5,11 @@ feedback loop (single or multi-vehicle).
 Usage examples:
 
     # Full pipeline from raw logs (trim + match + train + select + feedback)
+    python -m run_pipeline --raw_data /path/to/raw_logs --model lstm --seed 42
+
+    # Same, but write trimmed output to a separate folder
     python -m run_pipeline --raw_data /path/to/raw_logs \
-                           --data /path/to/trimmed_logs \
+                           --data /path/to/trimmed_output \
                            --model lstm --seed 42
 
     # Skip trimming, use existing trimmed CSVs (train + select + feedback)
@@ -61,7 +64,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     data.add_argument("--raw_data", default="",
                       help="Raw log folder (triggers trimming step)")
     data.add_argument("--data", default="",
-                      help="Trimmed CSV folder (training + matching)")
+                      help="Trimmed CSV folder (training + matching). "
+                           "When used with --raw_data, trimmed output is "
+                           "written here instead of into the raw folder")
     data.add_argument("--new_data", default="",
                       help="New data folder (incremental learning)")
     data.add_argument("--npz", default="",
@@ -119,16 +124,23 @@ def stage_trim(args) -> None:
     from scripts.trimmers import (find_files_with_string, trim_sa, trim_pc5,
                                    trim_dsrc, get_first_timestamp, append_files)
 
-    PATH = args.raw_data
+    RAW = args.raw_data
+    # Write trimmed output to --data if provided, otherwise into --raw_data
+    OUT = args.data if args.data else RAW
 
-    files_dsrc = find_files_with_string(PATH, "dsrc")
-    files_pc5 = find_files_with_string(PATH, "pc5")
-    files_5g = find_files_with_string(PATH, "5g")
+    if OUT != RAW:
+        os.makedirs(OUT, exist_ok=True)
+        print(f"Raw logs:       {RAW}")
+        print(f"Trimmed output: {OUT}")
+
+    files_dsrc = find_files_with_string(RAW, "dsrc")
+    files_pc5 = find_files_with_string(RAW, "pc5")
+    files_5g = find_files_with_string(RAW, "5g")
     print("Matching DSRC files: ", files_dsrc)
     print("Matching PC5 files: ", files_pc5)
     print("Matching 5G files: ", files_5g)
 
-    sa_data = trim_sa(files_5g, os.path.join(PATH, "trim_5g.csv"), PATH)
+    sa_data = trim_sa(files_5g, os.path.join(OUT, "trim_5g.csv"), RAW)
 
     combined_out_pc5 = 0
     combined_out_dsrc = 0
@@ -139,8 +151,8 @@ def stage_trim(args) -> None:
         output_file_pc5 = f"trim_pc5_{i}.csv"
         output_file_dsrc = f"trim_dsrc_{i}.csv"
         print("Trimming PC5 file ", file)
-        out_pc5, pc5_data = trim_pc5(os.path.join(PATH, file),
-                                      os.path.join(PATH, output_file_pc5))
+        out_pc5, pc5_data = trim_pc5(os.path.join(RAW, file),
+                                      os.path.join(OUT, output_file_pc5))
         print(f"Generated {out_pc5} lines for PC5")
         combined_out_pc5 += out_pc5
 
@@ -149,24 +161,24 @@ def stage_trim(args) -> None:
             log_dsrc = [f for f in files_dsrc if rsu_id in f][0]
         except IndexError:
             print("No matching DSRC file found for ", file)
-            trimmed_files_pc5.append(os.path.join(PATH, output_file_pc5))
+            trimmed_files_pc5.append(os.path.join(OUT, output_file_pc5))
             continue
 
         print("Trimming DSRC file ", log_dsrc)
-        out_dsrc = trim_dsrc(os.path.join(PATH, log_dsrc),
-                              os.path.join(PATH, output_file_dsrc),
+        out_dsrc = trim_dsrc(os.path.join(RAW, log_dsrc),
+                              os.path.join(OUT, output_file_dsrc),
                               pc5_data, sa_data)
         print(f"Generated {out_dsrc} lines for DSRC")
         combined_out_dsrc += out_dsrc
-        trimmed_files_pc5.append(os.path.join(PATH, output_file_pc5))
-        trimmed_files_dsrc.append(os.path.join(PATH, output_file_dsrc))
+        trimmed_files_pc5.append(os.path.join(OUT, output_file_pc5))
+        trimmed_files_dsrc.append(os.path.join(OUT, output_file_dsrc))
 
     trimmed_files_pc5.sort(key=get_first_timestamp)
-    append_files(os.path.join(PATH, "trim_pc5.csv"), trimmed_files_pc5)
+    append_files(os.path.join(OUT, "trim_pc5.csv"), trimmed_files_pc5)
     print(f"Combined trimmed PC5 files into trim_pc5.csv. Total lines: {combined_out_pc5}")
 
     trimmed_files_dsrc.sort(key=get_first_timestamp)
-    append_files(os.path.join(PATH, "trim_dsrc.csv"), trimmed_files_dsrc)
+    append_files(os.path.join(OUT, "trim_dsrc.csv"), trimmed_files_dsrc)
     print(f"Combined trimmed DSRC files into trim_dsrc.csv. Total lines: {combined_out_dsrc}")
 
     # Clean up intermediate per-RSU trimmed files
@@ -174,7 +186,7 @@ def stage_trim(args) -> None:
         os.remove(f)
 
     if not args.data:
-        args.data = args.raw_data
+        args.data = RAW
 
 
 def stage_match(args) -> None:
