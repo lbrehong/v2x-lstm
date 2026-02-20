@@ -37,6 +37,7 @@ import sys
 import os
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -447,6 +448,14 @@ def main(argv=None) -> None:
     # Work from the project root
     os.chdir(_PROJECT_DIR)
 
+    # Create timestamped run directory under output/
+    import config
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("output", f"run_{run_stamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    config.OUTPUT_DIR = run_dir
+    print(f"Run output directory: {_PROJECT_DIR / run_dir}")
+
     # ── Stage 1: Trim raw logs ────────────────────────────────────────────
     stage_trim(args)
 
@@ -471,7 +480,7 @@ def main(argv=None) -> None:
 
     # ── Done ──────────────────────────────────────────────────────────────
     banner("Pipeline complete")
-    print(f"Output files are in: {_PROJECT_DIR / 'output'}/")
+    print(f"Output files are in: {_PROJECT_DIR / run_dir}/")
     print(f"Models are in:       {_PROJECT_DIR / 'models'}/")
     if merged_csv:
         print(f"Merged CSV used:     {merged_csv}")

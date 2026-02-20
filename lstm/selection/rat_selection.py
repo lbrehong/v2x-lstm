@@ -90,6 +90,7 @@ def get_predictions(model, rat, gps_data):
     print("Processed Predictions Shape:", predictions.shape)
 
     pred_latency, pred_pdr = predictions[:, 0].flatten(), predictions[:, 1].flatten()
+    pred_latency = np.clip(pred_latency, 0.0, 1.0)
     latency = latency_scaler.inverse_transform(np.array(pred_latency).reshape(-1, 1)).flatten()
     pdr = np.clip(pred_pdr, 0.0, 1.0)
 

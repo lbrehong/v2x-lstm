@@ -198,10 +198,10 @@ class RATSelectionAPI:
             pred_latency = pred[0].flatten()[0]
             pred_pdr = pred[1].flatten()[0]
 
-            # Denormalize latency
+            # Clamp normalized outputs to [0, 1] and denormalize
+            pred_latency = float(np.clip(pred_latency, 0.0, 1.0))
             pred_latency = self.latency_scaler.inverse_transform([[pred_latency]])[0][0]
-            # Clamp PDR to [0, 1]
-            pred_pdr = max(0.0, min(1.0, pred_pdr))
+            pred_pdr = float(np.clip(pred_pdr, 0.0, 1.0))
 
             predictions[rat_enum] = (pred_latency, pred_pdr)
 

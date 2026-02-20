@@ -234,7 +234,7 @@ def _retrain_model(
     # Denormalize latency predictions and targets
     lat_scaler = api.latency_scaler
     pred_latency_ms = lat_scaler.inverse_transform(
-        pred_latency_norm.reshape(-1, 1)).flatten()
+        np.clip(pred_latency_norm, 0.0, 1.0).reshape(-1, 1)).flatten()
     actual_latency_ms = lat_scaler.inverse_transform(
         y_latency.reshape(-1, 1)).flatten()
     latency_mae_ms = float(np.mean(np.abs(pred_latency_ms - actual_latency_ms)))

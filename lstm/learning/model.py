@@ -63,8 +63,8 @@ def build_model(model_type, timesteps, features):
         raise ValueError(f"Unknown model type: {model_type}")
 
     dense_layer = Dense(32, activation='relu')(rnn_layer)
-    latency_output = Dense(1, name="latency_ms")(dense_layer)
-    pdr_output = Dense(1, name="pdr")(dense_layer)
+    latency_output = Dense(1, activation='sigmoid', name="latency_ms")(dense_layer)
+    pdr_output = Dense(1, activation='sigmoid', name="pdr")(dense_layer)
 
     model = Model(inputs=input_layer, outputs=[latency_output, pdr_output])
     model.compile(
@@ -214,6 +214,7 @@ def _process_batch(model, x_new, y_new, gps_scaler, latency_scaler):
 
     # Batch inverse transforms
     lat_lons = gps_scaler.inverse_transform(x_batch[:, -1, :2])
+    pred_latencies_norm = np.clip(pred_latencies_norm, 0.0, 1.0)
     pred_latencies = latency_scaler.inverse_transform(
         pred_latencies_norm.reshape(-1, 1)).flatten()
     pred_pdrs = np.clip(pred_pdrs_norm, 0.0, 1.0)
