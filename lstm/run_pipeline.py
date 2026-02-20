@@ -81,9 +81,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                        help="Model architecture (default: lstm)")
     model.add_argument("--rats", nargs="+", default=["5g", "pc5", "dsrc"],
                        help="RATs to train (default: 5g pc5 dsrc)")
-    model.add_argument("--load", default="",
-                       help='Model loading: "none"=fresh, "existing"=latest, '
-                            "or path to .keras (default: auto-detect)")
+    model.add_argument("--load", default="none",
+                       help='Model loading: "none"=train fresh (default), '
+                            '"existing"=load latest, or path to .keras')
     model.add_argument("--epochs", type=int, default=0,
                        help="Training epochs (default: 100 from config)")
 
@@ -317,10 +317,6 @@ def stage_train(args) -> None:
             print(f"Loading existing {MODEL_TYPE} model for {rat}...")
             loaded_path = get_latest_model(MODEL_TYPE, rat)
             model = load_model(loaded_path, custom_objects={'rmse': rmse})
-
-            with open(os.path.join(OUTPUT_DIR, f"{MODEL_TYPE}_{rat}_training_history.json"), "r") as f:
-                history = json.load(f)
-
             print(f"{MODEL_TYPE.upper()} model loaded: {loaded_path}")
         else:
             if not do_load:
