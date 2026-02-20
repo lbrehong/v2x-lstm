@@ -37,9 +37,9 @@ TRAIN_RATIO = 0.4
 # Data Collection Parameters
 # =============================================================================
 TX_INTERVAL_MS = {
-    "5g": 2000,   # 5G SA ping interval (0.5 Hz, measured from df_ping.json)
-    "pc5": 100,   # C-V2X PC5 CAM rate (10 Hz)
-    "dsrc": 100,  # DSRC BSM rate (10 Hz)
+    "5g": 50,     # 5G SA OBU test traffic (20 Hz nominal, ~46ms observed due to jitter)
+    "pc5": 20,    # C-V2X PC5 sidelink rate (50 Hz, measured from raw logs)
+    "dsrc": 20,   # DSRC broadcast rate (50 Hz, measured from raw logs)
 }
 DEFAULT_TX_INTERVAL_MS = 100  # Fallback for unspecified RATs
 

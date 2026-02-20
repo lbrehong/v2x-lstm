@@ -79,9 +79,9 @@ def match_data(input_dir, primary=None, secondary=None):
         )
     ].sort_index()
 
-    primary_df.drop("tx_timestamp_ms", axis=1, inplace=True)
-    primary_df.drop("tx_timestamp_sec", axis=1, inplace=True)
-    primary_df.drop("tx_seq_num", axis=1, inplace=True)
+    for col in ("tx_timestamp_ms", "tx_timestamp_sec", "tx_seq_num"):
+        if col in primary_df.columns:
+            primary_df.drop(col, axis=1, inplace=True)
     primary_out = _output_name(primary)
     primary_df.to_csv(os.path.join(input_dir, f"matched_{primary_out}"), index=False)
 
@@ -158,9 +158,9 @@ def match_data(input_dir, primary=None, secondary=None):
                 lambda x: x.sample(n=1).index[0]
             )
         ].sort_index()
-        matched_df.drop("tx_timestamp_ms", axis=1, inplace=True)
-        matched_df.drop("tx_timestamp_sec", axis=1, inplace=True)
-        matched_df.drop("tx_seq_num", axis=1, inplace=True)
+        for col in ("tx_timestamp_ms", "tx_timestamp_sec", "tx_seq_num"):
+            if col in matched_df.columns:
+                matched_df.drop(col, axis=1, inplace=True)
 
         csvs_out = _output_name(csvs)
         matched_df.to_csv(os.path.join(input_dir, f"matched_{csvs_out}"), index=False)
