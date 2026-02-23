@@ -363,7 +363,7 @@ class TestRetrainModel:
         assert entry["n_samples"] == 10
         assert entry["loss_before"] == pytest.approx(0.05)
         assert entry["loss_after"] == pytest.approx(0.04)
-        assert "model_path" in entry
+        assert "pdr_mae" in entry
         # Timing and learning rate
         assert entry["train_time_s"] >= 0
         assert entry["learning_rate"] == pytest.approx(0.001)
@@ -383,21 +383,17 @@ class TestRetrainModel:
         assert entry["latency_mae_ms"] >= 0
         assert entry["pdr_mae"] >= 0
 
-    def test_retrain_calls_fit_and_save(self):
-        """_retrain_model should call model.fit and model.save."""
+    def test_retrain_calls_fit_not_save(self):
+        """_retrain_model should call model.fit but not save (save happens at end of loop)."""
         from scripts.feedback_loop import _retrain_model
 
         mock_api, mock_model, x, y_lat, y_pdr = self._make_retrain_mock(
             "dsrc", 5, 6, model_type="gru")
 
-        with patch("scripts.feedback_loop.MODEL_DIR", "/tmp/test_models"):
-            _retrain_model(mock_api, "dsrc", x, y_lat, y_pdr, cycle=2, retrain_log=[])
+        _retrain_model(mock_api, "dsrc", x, y_lat, y_pdr, cycle=2, retrain_log=[])
 
         mock_model.fit.assert_called_once()
-        mock_model.save.assert_called_once()
-        # Check save path contains the expected pattern
-        save_path = mock_model.save.call_args[0][0]
-        assert "retrained_gru_dsrc_" in save_path
+        mock_model.save.assert_not_called()
 
     def test_retrain_evaluate_scalar(self):
         """_retrain_model should handle evaluate returning a scalar."""

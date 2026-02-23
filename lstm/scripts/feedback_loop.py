@@ -240,13 +240,6 @@ def _retrain_model(
     latency_mae_ms = float(np.mean(np.abs(pred_latency_ms - actual_latency_ms)))
     pdr_mae = float(np.mean(np.abs(pred_pdr - y_pdr)))
 
-    # Save checkpoint
-    save_path = os.path.join(
-        MODEL_DIR,
-        f"retrained_{api.model_type}_{rat_str}_{int(time.time())}.keras",
-    )
-    model.save(save_path)
-
     retrain_log.append({
         "cycle": cycle,
         "rat": rat_str,
@@ -274,7 +267,6 @@ def _retrain_model(
         # Prediction accuracy (real units)
         "latency_mae_ms": round(latency_mae_ms, 4),
         "pdr_mae": round(pdr_mae, 6),
-        "model_path": save_path,
     })
     print(
         f"  Retrained {api.model_type}_{rat_str}: "
@@ -471,6 +463,16 @@ def run_feedback_loop(
         rt_path = os.path.join(OUTPUT_DIR, "feedback_loop_retraining_log.csv")
         pd.DataFrame(retrain_log).to_csv(rt_path, index=False)
         print(f"Retraining log saved to {rt_path}")
+
+    # Save final retrained models
+    for rat_str, model in api.models.items():
+        if retrain_count.get(rat_str, 0) > 0:
+            save_path = os.path.join(
+                MODEL_DIR,
+                f"retrained_{model_type}_{rat_str}_{int(time.time())}.keras",
+            )
+            model.save(save_path)
+            print(f"Final retrained model saved to {save_path}")
 
     # DTMC stats
     dtmc_stats = {}
@@ -817,6 +819,16 @@ def run_multi_vehicle_loop(
         rt_path = os.path.join(OUTPUT_DIR, "feedback_multi_retraining_log.csv")
         pd.DataFrame(retrain_log).to_csv(rt_path, index=False)
         print(f"Retraining log saved to {rt_path}")
+
+    # Save final retrained models
+    for rat_str, model in api.models.items():
+        if retrain_count.get(rat_str, 0) > 0:
+            save_path = os.path.join(
+                MODEL_DIR,
+                f"retrained_{model_type}_{rat_str}_{int(time.time())}.keras",
+            )
+            model.save(save_path)
+            print(f"Final retrained model saved to {save_path}")
 
     # Contention log
     ct_path = os.path.join(OUTPUT_DIR, "feedback_multi_contention.csv")
