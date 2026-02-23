@@ -186,7 +186,8 @@ def correct_pdr_for_packet_size(
     base_pdr: float,
     base_size: int,
     target_size: int,
-    correction_exponent: float = 0.8
+    #correction_exponent: float = 0.8
+    correction_exponent: float = 1.0 # Default to 1.0 for direct power-law, can be tuned based on empirical data
 ) -> float:
     """
     Apply packet size correction to PDR estimate.

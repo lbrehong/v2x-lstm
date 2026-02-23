@@ -40,10 +40,10 @@ def get_latest_model(model_type: str, rat: str, model_dir: str = MODEL_DIR) -> O
     Returns:
         Path to most recent model, or None if not found
     """
-    pattern = os.path.join(model_dir, f"{model_type}_{rat}_*.keras")
+    pattern = os.path.join(model_dir, f"*{model_type}_{rat}_*.keras")
     model_files = glob.glob(pattern)
 
-    regex = re.compile(rf"{model_type}_{rat}_(\d+)\.keras")
+    regex = re.compile(rf"(?:retrained_)?{model_type}_{rat}_(\d+)\.keras")
     files_with_time = []
 
     for filepath in model_files:

@@ -447,7 +447,10 @@ def main(argv=None) -> None:
     # Create timestamped run directory under output/
     import config
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join("output", f"run_{run_stamp}")
+    run_name = f"run_{run_stamp}_{args.model}"
+    if not args.skip_feedback and args.num_vehicles > 1:
+        run_name += f"_{args.num_vehicles}v"
+    run_dir = os.path.join("output", run_name)
     os.makedirs(run_dir, exist_ok=True)
     config.OUTPUT_DIR = run_dir
     print(f"Run output directory: {_PROJECT_DIR / run_dir}")
