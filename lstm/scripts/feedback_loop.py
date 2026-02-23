@@ -394,12 +394,12 @@ def run_feedback_loop(
                 # Normalise latency target the same way training data was prepared
                 lat_norm = latency_scaler.transform([[actual_lat]])[0][0]
 
-                # For PDR target, prefer DTMC window PDR (smoothed) over raw value
-                dtmc = qsim.dtmc_sizers.get(selected_rat)
-                window_pdr = dtmc.get_window_pdr(sim_time) if dtmc else None
-                pdr_target = window_pdr if window_pdr is not None else actual_pdr_val
-
-                buffers[rat_str].append((seq, lat_norm, pdr_target))
+                # Use ground-truth link-level PDR from the CSV as the
+                # retraining target.  The simulator applies packet-size
+                # correction and contention on top of the model's
+                # prediction, so training on DTMC window_pdr would
+                # double-count those effects and poison the model.
+                buffers[rat_str].append((seq, lat_norm, actual_pdr_val))
 
         # 7. Check if retraining is due for this RAT
         if len(buffers[rat_str]) >= retrain_interval and rat_str in api.models:
@@ -747,10 +747,8 @@ def run_multi_vehicle_loop(
 
                 if actual_lat is not None and actual_pdr_val is not None:
                     lat_norm = latency_scaler.transform([[actual_lat]])[0][0]
-                    dtmc = vehicle_qsims[v].dtmc_sizers.get(selected_rat)
-                    window_pdr = dtmc.get_window_pdr(sim_time) if dtmc else None
-                    pdr_target = window_pdr if window_pdr is not None else actual_pdr_val
-                    buffers[rat_str].append((seq, lat_norm, pdr_target))
+                    # Use ground-truth link-level PDR (see single-vehicle comment)
+                    buffers[rat_str].append((seq, lat_norm, actual_pdr_val))
 
             # DTMC state for logging
             dtmc = vehicle_qsims[v].dtmc_sizers.get(selected_rat)
