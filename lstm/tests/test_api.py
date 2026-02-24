@@ -381,6 +381,28 @@ class TestRATSelectionWithMockedModels:
         decision = api_with_mock_models.select_rat(sample_state, queue_ctx)
         assert isinstance(decision, RATDecision)
 
+    def test_select_rat_with_contention_context(self, api_with_mock_models, sample_state):
+        """select_rat should accept contention context and adjust PDR filtering."""
+        # Contention context: PC5 is heavily overloaded (5 vehicles, util=3.0)
+        contention_ctx = {
+            RATType.DSRC: (1, 0.5),
+            RATType.PC5: (5, 3.0),
+            RATType.FiveG: (1, 0.05),
+        }
+        decision = api_with_mock_models.select_rat(
+            sample_state, contention_context=contention_ctx,
+        )
+        assert isinstance(decision, RATDecision)
+        # With heavy PC5 contention, PC5 should not be selected
+        # (contention-corrected PDR will be very low)
+        assert decision.selected_rat != RATType.PC5
+
+    def test_select_rat_without_contention_context(self, api_with_mock_models, sample_state):
+        """select_rat without contention context should use raw pred_pdr."""
+        decision = api_with_mock_models.select_rat(sample_state)
+        assert isinstance(decision, RATDecision)
+        # Without contention, all RATs are candidates (raw pred_pdr is high)
+
 
 class TestOutcomeReporting:
     """Tests for transmission outcome reporting."""

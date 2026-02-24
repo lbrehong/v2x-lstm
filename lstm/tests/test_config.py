@@ -14,7 +14,8 @@ from config import (
     MIN_SINR_5G, MAX_SINR_5G, MIN_RSRP_5G, MAX_RSRP_5G,
     MIN_RSRP_DSRC, MAX_RSRP_DSRC,
     FEATURE_COLS, TARGET_COLS, FEATURES_COUNT,
-    create_gps_scaler, create_latency_scaler, create_pdr_scaler,
+    create_gps_scaler, create_latency_scaler, create_latency_scaler_for_rat,
+    create_pdr_scaler,
     create_throughput_scaler, create_sinr_5g_scaler,
     create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
     create_all_scalers,
@@ -120,9 +121,9 @@ class TestGpsScaler:
         """Scaler should handle batch transformations."""
         scaler = create_gps_scaler()
         coords = np.array([
-            [43.555, 1.464],
+            [43.558, 1.462],
             [43.560, 1.467],
-            [43.567, 1.471]
+            [43.564, 1.471]
         ])
         scaled = scaler.transform(coords)
         assert scaled.shape == coords.shape
@@ -157,6 +158,43 @@ class TestLatencyScaler:
         scaled = scaler.transform(original)
         recovered = scaler.inverse_transform(scaled)
         np.testing.assert_array_almost_equal(original, recovered, decimal=6)
+
+
+class TestPerRatLatencyScaler:
+    """Tests for per-RAT latency scalers."""
+
+    def test_per_rat_scaler_creation(self):
+        """Per-RAT latency scalers should be created for all RATs."""
+        for rat in ("5g", "pc5", "dsrc"):
+            scaler = create_latency_scaler_for_rat(rat)
+            assert scaler is not None
+
+    def test_per_rat_scaler_bounds(self):
+        """Per-RAT scalers should use tighter bounds than global."""
+        global_scaler = create_latency_scaler()
+        for rat in ("5g", "pc5", "dsrc"):
+            rat_scaler = create_latency_scaler_for_rat(rat)
+            # 50ms should scale higher with per-RAT scaler (tighter bounds)
+            global_val = global_scaler.transform([[50.0]])[0][0]
+            rat_val = rat_scaler.transform([[50.0]])[0][0]
+            assert rat_val >= global_val
+
+    def test_per_rat_scaler_roundtrip(self):
+        """Per-RAT scalers should correctly roundtrip values."""
+        for rat in ("5g", "pc5", "dsrc"):
+            scaler = create_latency_scaler_for_rat(rat)
+            original = np.array([[15.0]])
+            scaled = scaler.transform(original)
+            recovered = scaler.inverse_transform(scaled)
+            np.testing.assert_array_almost_equal(original, recovered, decimal=6)
+
+    def test_unknown_rat_falls_back(self):
+        """Unknown RAT should fall back to global bounds."""
+        scaler = create_latency_scaler_for_rat("unknown")
+        global_scaler = create_latency_scaler()
+        val = scaler.transform([[50.0]])[0][0]
+        global_val = global_scaler.transform([[50.0]])[0][0]
+        assert abs(val - global_val) < 1e-6
 
 
 class TestPdrScaler:

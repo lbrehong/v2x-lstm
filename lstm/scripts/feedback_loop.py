@@ -42,7 +42,7 @@ from api_types import (
 )
 from config import (
     TIMESTEPS, MODEL_DIR, OUTPUT_DIR,
-    create_latency_scaler,
+    create_latency_scaler_for_rat,
 )
 from utils import row_to_network_state, ensure_dir_exists
 from selection.api import RATSelectionAPI
@@ -205,9 +205,22 @@ def _retrain_model(
     y_pdr: np.ndarray,
     cycle: int,
     retrain_log: List[Dict],
+    latency_scaler=None,
 ):
-    """Run one retraining cycle on the buffered data for *rat_str*."""
+    """Run one retraining cycle on the buffered data for *rat_str*.
+
+    Safeguards:
+    - Saves model weights before retraining; rolls back if loss spikes >2x.
+    - Applies gradient clipping (clipnorm=1.0) to prevent large updates.
+    """
     model = api.models[rat_str]
+
+    # Save weights for potential rollback
+    weights_before = model.get_weights()
+
+    # Apply gradient clipping if not already set
+    if not getattr(model.optimizer, "clipnorm", None):
+        model.optimizer.clipnorm = 1.0
 
     # Evaluate loss before retraining
     # Returns [total_loss, latency_loss, pdr_loss, latency_rmse, pdr_rmse]
@@ -215,6 +228,8 @@ def _retrain_model(
     eval_before = model.evaluate(x_buffer, y_dict, verbose=0)
     if not isinstance(eval_before, list):
         eval_before = [eval_before, None, None, None, None]
+
+    loss_before = eval_before[0]
 
     # Retrain for 1 epoch with validation split
     lr_before = float(model.optimizer.learning_rate)
@@ -227,12 +242,28 @@ def _retrain_model(
     train_time_s = time.time() - t0
     h = history.history
 
+    # Evaluate loss after retraining on the full buffer
+    eval_after = model.evaluate(x_buffer, y_dict, verbose=0)
+    if not isinstance(eval_after, list):
+        eval_after = [eval_after]
+    loss_after = eval_after[0]
+
+    # Rollback if loss spiked significantly
+    rolled_back = False
+    if loss_before > 0 and loss_after > loss_before * 2.0:
+        model.set_weights(weights_before)
+        rolled_back = True
+        print(
+            f"  WARNING: Rolled back {api.model_type}_{rat_str} cycle {cycle}: "
+            f"loss spiked {loss_before:.5f} -> {loss_after:.5f} (>{2.0:.1f}x)"
+        )
+
     # Prediction accuracy snapshot (MAE in real units)
     preds = model.predict(x_buffer, verbose=0)
     pred_latency_norm = preds[0].flatten()
     pred_pdr = preds[1].flatten()
-    # Denormalize latency predictions and targets
-    lat_scaler = api.latency_scaler
+    # Denormalize latency predictions and targets using per-RAT scaler
+    lat_scaler = latency_scaler if latency_scaler is not None else api.latency_scaler
     pred_latency_ms = lat_scaler.inverse_transform(
         np.clip(pred_latency_norm, 0.0, 1.0).reshape(-1, 1)).flatten()
     actual_latency_ms = lat_scaler.inverse_transform(
@@ -246,6 +277,7 @@ def _retrain_model(
         "n_samples": len(x_buffer),
         "train_time_s": round(train_time_s, 4),
         "learning_rate": lr_before,
+        "rolled_back": rolled_back,
         # Before-retrain metrics
         "loss_before": eval_before[0],
         "latency_loss_before": eval_before[1],
@@ -268,9 +300,10 @@ def _retrain_model(
         "latency_mae_ms": round(latency_mae_ms, 4),
         "pdr_mae": round(pdr_mae, 6),
     })
+    status = "ROLLED BACK" if rolled_back else f"loss {loss_before:.5f} -> {loss_after:.5f}"
     print(
         f"  Retrained {api.model_type}_{rat_str}: "
-        f"loss {eval_before[0]:.5f} -> {h['loss'][0]:.5f}  "
+        f"{status}  "
         f"(val_loss={h.get('val_loss', [None])[0]:.5f}, "
         f"lat_mae={latency_mae_ms:.2f}ms, pdr_mae={pdr_mae:.4f})  "
         f"({len(x_buffer)} samples, cycle {cycle}, {train_time_s:.2f}s)"
@@ -306,7 +339,9 @@ def run_feedback_loop(
         base_packet_size=base_packet_size,
         correction_exponent=correction_exponent,
     )
-    latency_scaler = create_latency_scaler()
+    latency_scalers = {
+        rat: create_latency_scaler_for_rat(rat) for rat in ("5g", "pc5", "dsrc")
+    }
 
     # Per-RAT retraining buffers:  list of (sequence, y_latency_norm, y_pdr)
     buffers: Dict[str, List[Tuple[np.ndarray, float, float]]] = {
@@ -384,7 +419,7 @@ def run_feedback_loop(
 
             if actual_lat is not None and actual_pdr_val is not None:
                 # Normalise latency target the same way training data was prepared
-                lat_norm = latency_scaler.transform([[actual_lat]])[0][0]
+                lat_norm = latency_scalers[rat_str].transform([[actual_lat]])[0][0]
 
                 # Use ground-truth link-level PDR from the CSV as the
                 # retraining target.  The simulator applies packet-size
@@ -406,6 +441,7 @@ def run_feedback_loop(
                 api, rat_str, x_batch, y_lat, y_pdr,
                 cycle=retrain_count[rat_str],
                 retrain_log=retrain_log,
+                latency_scaler=latency_scalers[rat_str],
             )
             buffers[rat_str] = []
 
@@ -587,7 +623,9 @@ def run_multi_vehicle_loop(
 
     # Shared components
     api = RATSelectionAPI(model_type=model_type)
-    latency_scaler = create_latency_scaler()
+    latency_scalers = {
+        rat: create_latency_scaler_for_rat(rat) for rat in ("5g", "pc5", "dsrc")
+    }
 
     # Per-vehicle components
     vehicle_rngs = [np.random.RandomState(seed + v if seed is not None else v)
@@ -683,6 +721,56 @@ def run_multi_vehicle_loop(
                 n, pkts, rat_enum,
             )
 
+        # Phase 2.5: Re-select vehicles on overloaded RATs with contention context
+        overloaded_rats = {r for r, u in utilization_per_rat.items() if u > 1.0}
+        if overloaded_rats:
+            contention_ctx = {
+                rat_enum: (vehicles_per_rat.get(rat_enum, 0),
+                           utilization_per_rat[rat_enum])
+                for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]
+            }
+            for v in range(num_vehicles):
+                if vehicle_rats[v] not in overloaded_rats:
+                    continue
+                state_v = _perturb_state(base_state, vehicle_rngs[v])
+                # Restore history but save a copy — select_rat calls
+                # _build_sequence which appends features for all RATs.
+                # Pass 1 already appended, so we restore after re-selection.
+                api._history = vehicle_histories[v]
+                saved_history = {
+                    k: list(v_list) for k, v_list in api._history.items()
+                }
+                queue_ctx = vehicle_qsims[v].get_queue_context()
+                new_decision = api.select_rat(
+                    state_v, queue_ctx, contention_context=contention_ctx,
+                )
+                # Restore history to avoid double-appending from Pass 1
+                api._history = saved_history
+                vehicle_histories[v] = saved_history
+                if new_decision.selected_rat == RATType.UNAVAILABLE:
+                    continue
+                decisions[v] = new_decision
+                vehicle_rats[v] = new_decision.selected_rat
+                pkt_decisions[v] = vehicle_qsims[v].decide_packet_size(
+                    new_decision, sim_time,
+                )
+
+            # Recompute utilization after re-selection
+            active_rats = [r for r in vehicle_rats if r is not None]
+            vehicles_per_rat = Counter(active_rats)
+            packets_per_rat = {}
+            for v in range(num_vehicles):
+                if vehicle_rats[v] is not None and pkt_decisions[v] is not None:
+                    packets_per_rat.setdefault(vehicle_rats[v], []).append(
+                        pkt_decisions[v].packet_size_bytes,
+                    )
+            for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
+                pkts = packets_per_rat.get(rat_enum, [])
+                n = vehicles_per_rat.get(rat_enum, 0)
+                utilization_per_rat[rat_enum] = compute_channel_utilization(
+                    n, pkts, rat_enum,
+                )
+
         # Log contention for this time step
         contention_entry = {"idx": idx, "sim_time": round(sim_time, 4)}
         for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
@@ -748,7 +836,7 @@ def run_multi_vehicle_loop(
                 actual_pdr_val = _actual_pdr(state_v, selected_rat)
 
                 if actual_lat is not None and actual_pdr_val is not None:
-                    lat_norm = latency_scaler.transform([[actual_lat]])[0][0]
+                    lat_norm = latency_scalers[rat_str].transform([[actual_lat]])[0][0]
                     # Use ground-truth link-level PDR (see single-vehicle comment)
                     buffers[rat_str].append((seq, lat_norm, actual_pdr_val))
 
@@ -792,6 +880,7 @@ def run_multi_vehicle_loop(
                     api, rat_str_r, x_batch, y_lat, y_pdr,
                     cycle=retrain_count[rat_str_r],
                     retrain_log=retrain_log,
+                    latency_scaler=latency_scalers[rat_str_r],
                 )
                 buffers[rat_str_r] = []
 

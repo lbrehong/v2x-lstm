@@ -72,8 +72,8 @@ def super_merged_csv(tmp_path):
     rng = np.random.RandomState(42)
 
     data = {
-        "tx_latitude": rng.uniform(43.555, 43.567, n_rows),
-        "tx_longitude": rng.uniform(1.464, 1.472, n_rows),
+        "tx_latitude": rng.uniform(43.558, 43.564, n_rows),
+        "tx_longitude": rng.uniform(1.462, 1.472, n_rows),
         "latency_ms_5g": rng.uniform(10, 30, n_rows),
         "sinr": rng.uniform(-5, 40, n_rows),
         "rsrp": rng.uniform(-127, -67, n_rows),

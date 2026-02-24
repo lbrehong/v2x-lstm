@@ -258,7 +258,7 @@ class TestPreprocessLstmInput:
         np.random.seed(42)
         n = 50
         return pd.DataFrame({
-            'tx_latitude': np.linspace(43.556, 43.567, n),
+            'tx_latitude': np.linspace(43.558, 43.564, n),
             'tx_longitude': np.linspace(1.465, 1.471, n),
             'latency_ms': np.random.uniform(5, 45, n),
             'sinr': np.random.uniform(-5, 40, n),
@@ -272,7 +272,7 @@ class TestPreprocessLstmInput:
         np.random.seed(42)
         n = 50
         return pd.DataFrame({
-            'tx_latitude': np.linspace(43.556, 43.567, n),
+            'tx_latitude': np.linspace(43.558, 43.564, n),
             'tx_longitude': np.linspace(1.465, 1.471, n),
             'latency_ms': np.random.uniform(5, 35, n),
             'pdr': np.random.uniform(0.9, 1.0, n),
@@ -284,7 +284,7 @@ class TestPreprocessLstmInput:
         np.random.seed(42)
         n = 50
         return pd.DataFrame({
-            'tx_latitude': np.linspace(43.556, 43.567, n),
+            'tx_latitude': np.linspace(43.558, 43.564, n),
             'tx_longitude': np.linspace(1.465, 1.471, n),
             'rsrp_1': np.random.uniform(-140, -50, n),
             'rsrp_2': np.random.uniform(-140, -50, n),

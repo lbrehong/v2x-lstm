@@ -26,7 +26,7 @@ def sample_5g_data():
     np.random.seed(42)
     n_samples = 100
     return pd.DataFrame({
-        'tx_latitude': np.linspace(43.555, 43.567, n_samples),
+        'tx_latitude': np.linspace(43.558, 43.564, n_samples),
         'tx_longitude': np.linspace(1.464, 1.471, n_samples),
         'latency_ms': np.random.uniform(5, 40, n_samples),
         'sinr': np.random.uniform(-5, 40, n_samples),
@@ -42,7 +42,7 @@ def sample_pc5_data():
     np.random.seed(42)
     n_samples = 100
     return pd.DataFrame({
-        'tx_latitude': np.linspace(43.555, 43.567, n_samples),
+        'tx_latitude': np.linspace(43.558, 43.564, n_samples),
         'tx_longitude': np.linspace(1.464, 1.471, n_samples),
         'latency_ms': np.random.uniform(5, 35, n_samples),
         'pdr': np.random.uniform(0.85, 1.0, n_samples),
@@ -56,7 +56,7 @@ def sample_dsrc_data():
     np.random.seed(42)
     n_samples = 100
     return pd.DataFrame({
-        'tx_latitude': np.linspace(43.555, 43.567, n_samples),
+        'tx_latitude': np.linspace(43.558, 43.564, n_samples),
         'tx_longitude': np.linspace(1.464, 1.471, n_samples),
         'rsrp_1': np.random.uniform(-140, -50, n_samples),
         'rsrp_2': np.random.uniform(-140, -50, n_samples),

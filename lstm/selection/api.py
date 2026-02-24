@@ -23,9 +23,10 @@ from config import (
     MODEL_DIR, OUTPUT_DIR, TIMESTEPS, TARGET_COLS,
     PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS,
     PACKET_SIZE_BOUNDS,
-    create_gps_scaler, create_latency_scaler,
+    create_gps_scaler, create_latency_scaler, create_latency_scaler_for_rat,
     create_sinr_5g_scaler, create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
 )
+from queuesim.phy_layer import compute_contention_pdr
 from utils import get_latest_model
 from learning.model import rmse
 from learning.data_preprocessing import preprocess_lstm_input
@@ -61,7 +62,11 @@ class RATSelectionAPI:
         self.model_dir = model_dir
         self.models: Dict[str, object] = {}
         self.gps_scaler = create_gps_scaler()
-        self.latency_scaler = create_latency_scaler()
+        self.latency_scaler = create_latency_scaler()  # global fallback
+        self.latency_scalers = {
+            rat: create_latency_scaler_for_rat(rat)
+            for rat in ("5g", "pc5", "dsrc")
+        }
         self.sinr_5g_scaler = create_sinr_5g_scaler()
         self.rsrp_5g_scaler = create_rsrp_5g_scaler()
         self.rsrp_dsrc_scaler = create_rsrp_dsrc_scaler()
@@ -107,6 +112,7 @@ class RATSelectionAPI:
             Numpy array of normalized features
         """
         lat_lon = self.gps_scaler.transform([[state.latitude, state.longitude]])[0]
+        lat_scaler = self.latency_scalers.get(rat, self.latency_scaler)
 
         if rat == "5g":
             # Features: lat, lon, latency, sinr, rsrp, pdr
@@ -114,7 +120,7 @@ class RATSelectionAPI:
             sinr = state.fiveg_sinr or 0.0
             rsrp = state.fiveg_rsrp or 0.0
             pdr = state.fiveg_pdr or 0.0
-            latency_norm = self.latency_scaler.transform([[latency]])[0][0]
+            latency_norm = lat_scaler.transform([[latency]])[0][0]
             sinr_norm = self.sinr_5g_scaler.transform([[sinr]])[0][0]
             rsrp_norm = self.rsrp_5g_scaler.transform([[rsrp]])[0][0]
             return np.array([lat_lon[0], lat_lon[1], latency_norm, sinr_norm, rsrp_norm, pdr])
@@ -123,7 +129,7 @@ class RATSelectionAPI:
             # Features: lat, lon, latency, pdr
             latency = state.pc5_latency_ms or 0.0
             pdr = state.pc5_pdr or 0.0
-            latency_norm = self.latency_scaler.transform([[latency]])[0][0]
+            latency_norm = lat_scaler.transform([[latency]])[0][0]
             return np.array([lat_lon[0], lat_lon[1], latency_norm, pdr])
 
         elif rat == "dsrc":
@@ -132,7 +138,7 @@ class RATSelectionAPI:
             rsrp_2 = state.dsrc_rsrp_2 or 0.0
             latency = state.dsrc_latency_ms or 0.0
             pdr = state.dsrc_pdr or 0.0
-            latency_norm = self.latency_scaler.transform([[latency]])[0][0]
+            latency_norm = lat_scaler.transform([[latency]])[0][0]
             rsrp_1_norm = self.rsrp_dsrc_scaler.transform([[rsrp_1]])[0][0]
             rsrp_2_norm = self.rsrp_dsrc_scaler.transform([[rsrp_2]])[0][0]
             return np.array([lat_lon[0], lat_lon[1], rsrp_1_norm, rsrp_2_norm, latency_norm, pdr])
@@ -200,7 +206,8 @@ class RATSelectionAPI:
 
             # Clamp normalized outputs to [0, 1] and denormalize
             pred_latency = float(np.clip(pred_latency, 0.0, 1.0))
-            pred_latency = self.latency_scaler.inverse_transform([[pred_latency]])[0][0]
+            lat_scaler = self.latency_scalers.get(rat_str, self.latency_scaler)
+            pred_latency = lat_scaler.inverse_transform([[pred_latency]])[0][0]
             pred_pdr = float(np.clip(pred_pdr, 0.0, 1.0))
 
             predictions[rat_enum] = (pred_latency, pred_pdr)
@@ -307,19 +314,23 @@ class RATSelectionAPI:
         self,
         state: NetworkState,
         queue_context: Optional[QueueContext] = None,
+        contention_context: Optional[Dict[RATType, Tuple[int, float]]] = None,
     ) -> RATDecision:
         """
         Select optimal RAT based on state and optional queue context.
 
         Implements a reliability-first, latency-optimized selection algorithm:
         1. Get predictions for all RATs
-        2. Filter by PDR reliability threshold
-        3. Select lowest latency among qualified RATs
-        4. Apply queue-aware adjustments if context provided
+        2. Apply contention correction if context provided
+        3. Filter by PDR reliability threshold
+        4. Select lowest latency among qualified RATs
+        5. Apply queue-aware adjustments if context provided
 
         Args:
             state: Current network state with measurements
             queue_context: Optional queue state for queue-aware selection
+            contention_context: Optional dict mapping RATType to
+                (n_vehicles, utilization) for contention-adjusted PDR filtering
 
         Returns:
             RATDecision with selected RAT and predictions
@@ -327,13 +338,22 @@ class RATSelectionAPI:
         # Get predictions for all RATs
         all_predictions = self.get_predictions(state)
 
-        # Build options list: (rat_enum, pred_latency, pred_pdr, actual_pdr)
+        # Build options list: (rat_enum, pred_latency, effective_pdr, actual_pdr)
+        # effective_pdr = contention-corrected if context provided, else raw pred_pdr
         options = []
         for rat_str, rat_enum in [("dsrc", RATType.DSRC), ("pc5", RATType.PC5), ("5g", RATType.FiveG)]:
             if rat_enum in all_predictions:
                 pred_lat, pred_pdr = all_predictions[rat_enum]
                 actual_pdr = self._get_actual_pdr(state, rat_enum)
-                options.append((rat_enum, pred_lat, pred_pdr, actual_pdr))
+
+                effective_pdr = pred_pdr
+                if contention_context and rat_enum in contention_context:
+                    n_veh, util = contention_context[rat_enum]
+                    effective_pdr = compute_contention_pdr(
+                        pred_pdr, util, rat_enum, n_veh,
+                    )
+
+                options.append((rat_enum, pred_lat, effective_pdr, actual_pdr))
 
         if not options:
             return RATDecision(
@@ -355,7 +375,7 @@ class RATSelectionAPI:
             if queue_context.recent_pdr_trend < -0.3:
                 pdr_threshold = min(0.999, pdr_threshold + 0.005)
 
-        # Filter by PDR threshold
+        # Filter by PDR threshold (uses effective_pdr which may be contention-corrected)
         valid_options = [opt for opt in options if opt[2] >= pdr_threshold]
 
         if not valid_options:

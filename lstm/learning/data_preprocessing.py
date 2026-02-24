@@ -15,7 +15,7 @@ from tqdm import tqdm
 from config import (
     MIN_LAT, MIN_LON,
     FEATURE_COLS, TARGET_COLS,
-    create_all_scalers,
+    create_all_scalers, create_latency_scaler_for_rat,
 )
 
 
@@ -147,6 +147,8 @@ def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
 
     feature_cols = FEATURE_COLS[rat]
     scalers = create_all_scalers()
+    # Override global latency scaler with per-RAT bounds for tighter normalization
+    scalers['latency_ms'] = create_latency_scaler_for_rat(rat)
     gps_scaler = scalers['tx_latitude']
 
     # Select only the columns needed for this RAT

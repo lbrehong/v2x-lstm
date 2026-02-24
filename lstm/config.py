@@ -9,13 +9,20 @@ from sklearn.preprocessing import MinMaxScaler
 # =============================================================================
 # GPS Bounds (Toulouse, France - test area)
 # =============================================================================
-MIN_LAT, MAX_LAT = 43.554669, 43.568290
-MIN_LON, MAX_LON = 1.463952, 1.472176
+MIN_LAT, MAX_LAT = 43.5570, 43.5650
+MIN_LON, MAX_LON = 1.4610, 1.4725
 
 # =============================================================================
 # Signal Quality Bounds
 # =============================================================================
-MIN_LATENCY, MAX_LATENCY = 0, 300  # in ms (covers 5G p95≈391, DSRC 0-19, PC5 5-93)
+MIN_LATENCY, MAX_LATENCY = 0, 300  # global fallback (covers 5G p95≈391, DSRC 0-19, PC5 5-93)
+
+# Per-RAT latency bounds — tighter ranges improve sigmoid gradient during training
+LATENCY_BOUNDS = {
+    "5g": (0, 200),   # covers p50=32ms; p95=391ms clips to 1.0 (acceptable)
+    "pc5": (0, 100),   # covers full range 5-93ms
+    "dsrc": (0, 25),   # covers full range 0.8-19ms
+}
 MIN_PDR, MAX_PDR = 0.0, 1.0
 MIN_THROUGHPUT, MAX_THROUGHPUT = 0, 100  # in Mbps
 MIN_SINR_5G, MAX_SINR_5G = -10, 45  # standard 3GPP SINR in dB
@@ -213,14 +220,31 @@ def create_gps_scaler():
 
 def create_latency_scaler():
     """
-    Create latency scaler with expected measurement bounds.
+    Create global latency scaler (fallback, [0, 300ms]).
 
-    Bounds (4-50ms) cover typical V2X latency range for all RATs.
+    Prefer ``create_latency_scaler_for_rat(rat)`` for tighter per-RAT bounds.
 
     Returns:
         Fitted MinMaxScaler for latency values
     """
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_LATENCY], [MAX_LATENCY]])
+
+
+def create_latency_scaler_for_rat(rat: str):
+    """
+    Create per-RAT latency scaler with tighter bounds.
+
+    Tighter bounds expand the useful normalized range into sigmoid's
+    high-gradient zone, improving training signal.
+
+    Args:
+        rat: RAT identifier ('5g', 'pc5', 'dsrc')
+
+    Returns:
+        Fitted MinMaxScaler for the RAT's latency range
+    """
+    lo, hi = LATENCY_BOUNDS.get(rat, (MIN_LATENCY, MAX_LATENCY))
+    return MinMaxScaler(feature_range=(0, 1)).fit([[lo], [hi]])
 
 
 def create_pdr_scaler():
