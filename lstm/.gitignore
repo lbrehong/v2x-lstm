@@ -13,6 +13,7 @@ output/
 *.csv
 *.json
 *.png
+*.keras
 
 # Model files
 models/*.keras
@@ -27,3 +28,4 @@ bkp/
 # Experiment directories
 10_03_singlemse/
 12_03-wrongpdr/
+/.claude/
