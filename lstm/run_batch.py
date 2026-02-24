@@ -272,9 +272,9 @@ def main() -> None:
                 "--model", model,
                 "--load", "existing",
                 "--skip_trimming",
-                "--skip_matching",
+            #    "--skip_matching",
                 "--skip_training",
-                "--skip_selection",
+            #    "--skip_selection",
                 "--num_vehicles", str(nv),
                 *fb_args,
             ]
