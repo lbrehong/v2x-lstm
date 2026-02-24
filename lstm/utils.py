@@ -28,7 +28,12 @@ def find_files_with_string(directory: str, search_string: str) -> List[str]:
     return matching_files
 
 
-def get_latest_model(model_type: str, rat: str, model_dir: str = MODEL_DIR) -> Optional[str]:
+def get_latest_model(
+    model_type: str,
+    rat: str,
+    model_dir: str = MODEL_DIR,
+    include_retrained: bool = False,
+) -> Optional[str]:
     """
     Find the most recent model file based on the model type and RAT.
 
@@ -36,6 +41,7 @@ def get_latest_model(model_type: str, rat: str, model_dir: str = MODEL_DIR) -> O
         model_type: Type of model ('lstm', 'gru', 'rnn')
         rat: RAT type ('5g', 'pc5', 'dsrc')
         model_dir: Directory containing saved models
+        include_retrained: If False (default), skip retrained_* files
 
     Returns:
         Path to most recent model, or None if not found
@@ -47,7 +53,10 @@ def get_latest_model(model_type: str, rat: str, model_dir: str = MODEL_DIR) -> O
     files_with_time = []
 
     for filepath in model_files:
-        match = regex.search(os.path.basename(filepath))
+        basename = os.path.basename(filepath)
+        if not include_retrained and basename.startswith("retrained_"):
+            continue
+        match = regex.search(basename)
         if match:
             files_with_time.append((filepath, int(match.group(1))))
 
