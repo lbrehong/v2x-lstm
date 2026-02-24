@@ -235,6 +235,10 @@ def compute_channel_utilization(
         return 0.0
     tx_interval = get_tx_interval_ms(rat)
     capacity_bytes = calculate_tx_capacity_bytes(rat, tx_interval)
+    # PC5 capacity is per-subchannel; scale to full channel
+    if rat.value == "pc5":
+        config = get_phy_config(rat)
+        capacity_bytes *= config.get("n_subchannels_total", 5)
     if capacity_bytes <= 0:
         return float("inf")
     total_demand = sum(packet_sizes[:n_vehicles])
@@ -284,15 +288,17 @@ def allocate_channel(
         return results
 
     if rat.value == "pc5":
-        # SPS Mode 2: each vehicle randomly selects a subchannel
+        # SPS: each vehicle selects a (subchannel, subframe) resource slot
         n_subch = config.get("n_subchannels_total", 5)
-        selections = rng.randint(0, n_subch, size=n)
-        # Count occupancy per subchannel
+        subframe_ms = config.get("subframe_duration_ms", 1.0)
+        n_subframes = int(tx_interval / subframe_ms)
+        n_resources = n_subch * n_subframes  # 5 × 20 = 100
+        selections = rng.randint(0, n_resources, size=n)
         occupancy = {}
         for i, s in enumerate(selections):
             occupancy.setdefault(int(s), []).append(i)
         results = [None] * n
-        for subch, vehicles in occupancy.items():
+        for slot, vehicles in occupancy.items():
             if len(vehicles) == 1:
                 i = vehicles[0]
                 results[i] = ChannelAllocation(i, transmitted=True, collision=False, deferred=False)
@@ -349,9 +355,12 @@ def compute_contention_pdr(
         return base_pdr
 
     if rat.value == "pc5":
-        # Birthday problem: P(no collision) = ((S-1)/S)^(N-1)
+        # SPS selects (subchannel, subframe) pairs — resource pool is S × T
         s = config.get("n_subchannels_total", 5)
-        p_no_collision = ((s - 1) / s) ** (n_vehicles - 1)
+        subframe_ms = config.get("subframe_duration_ms", 1.0)
+        tx_interval = get_tx_interval_ms(rat)
+        resources = int(s * (tx_interval / subframe_ms))
+        p_no_collision = ((resources - 1) / resources) ** (n_vehicles - 1)
         return base_pdr * p_no_collision
 
     # DSRC (CSMA/CA)
@@ -397,8 +406,10 @@ def compute_contention_latency(
     if rat.value == "pc5":
         # On collision, vehicle must re-sense for ~2 subframes
         s = config.get("n_subchannels_total", 5)
-        p_collision = 1.0 - ((s - 1) / s) ** (n_vehicles - 1)
         subframe_ms = config.get("subframe_duration_ms", 1.0)
+        tx_interval = get_tx_interval_ms(rat)
+        resources = int(s * (tx_interval / subframe_ms))
+        p_collision = 1.0 - ((resources - 1) / resources) ** (n_vehicles - 1)
         return base_latency + p_collision * subframe_ms * 2.0
 
     # DSRC (CSMA/CA): backoff grows with CW and utilization

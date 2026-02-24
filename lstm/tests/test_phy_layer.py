@@ -362,9 +362,10 @@ class TestComputeContentionPdr:
         assert result == 0.99
 
     def test_pc5_birthday_degradation(self):
-        """PC5 should degrade PDR via birthday-problem subchannel collisions."""
+        """PC5 should degrade PDR via birthday-problem (subchannel, subframe) collisions."""
         result = compute_contention_pdr(0.99, 1.0, RATType.PC5, 20)
-        assert result < 0.99 * 0.1
+        # 100 resource slots (5 subch × 20 subframes): 0.99 × 0.826 ≈ 0.82
+        assert 0.7 < result < 0.95
 
     def test_dsrc_cbr_degradation(self):
         """DSRC should degrade PDR with moderate utilization."""
@@ -375,13 +376,12 @@ class TestComputeContentionPdr:
         """Zero PDR should remain zero."""
         assert compute_contention_pdr(0.0, 0.5, RATType.PC5, 10) == 0.0
 
-    def test_ordering_5g_best_pc5_worst(self):
-        """With N=20, 5G should maintain PDR, PC5 should be worst (birthday)."""
+    def test_ordering_5g_best_dsrc_worst(self):
+        """With N=20, 5G (scheduled) best, DSRC (CSMA/CA) worst, PC5 mid."""
         pdr_5g = compute_contention_pdr(0.99, 0.5, RATType.FiveG, 20)
         pdr_dsrc = compute_contention_pdr(0.99, 0.5, RATType.DSRC, 20)
         pdr_pc5 = compute_contention_pdr(0.99, 1.9, RATType.PC5, 20)
-        assert pdr_5g > pdr_dsrc
-        assert pdr_5g > pdr_pc5
+        assert pdr_5g > pdr_pc5 > pdr_dsrc
 
 
 class TestComputeContentionLatency:
