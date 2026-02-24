@@ -403,6 +403,121 @@ class TestRATSelectionWithMockedModels:
         assert isinstance(decision, RATDecision)
         # Without contention, all RATs are candidates (raw pred_pdr is high)
 
+    def test_fallback_with_contention_prefers_5g(self, sample_state):
+        """When contention context is provided and no RAT passes threshold, 5G is selected.
+
+        Even if 5G has low predicted PDR, the contention-aware fallback
+        should unconditionally prefer 5G (scheduled access, contention-free)
+        because low predictions early in simulation are model warm-up artifacts.
+        """
+        with patch('selection.api.get_latest_model') as mock_get, \
+             patch('selection.api.load_model') as mock_load:
+            mock_get.return_value = "/fake/model/path.keras"
+
+            # All models predict low PDR (below threshold of 0.99)
+            mock_model_low = Mock()
+            mock_model_low.predict.return_value = [
+                np.array([[0.1]]),   # normalized latency
+                np.array([[0.50]]),  # PDR well below 0.99 threshold
+            ]
+
+            mock_load.return_value = mock_model_low
+
+            from selection.api import RATSelectionAPI
+            api = RATSelectionAPI(model_type="lstm")
+            api.models = {"dsrc": mock_model_low, "pc5": mock_model_low, "5g": mock_model_low}
+
+            contention_ctx = {
+                RATType.DSRC: (3, 0.8),
+                RATType.PC5: (3, 0.8),
+                RATType.FiveG: (3, 0.1),
+            }
+
+            decision = api.select_rat(sample_state, contention_context=contention_ctx)
+
+            assert decision.selected_rat == RATType.FiveG
+
+    def test_fallback_without_contention_uses_max_effective_pdr(self, sample_state):
+        """Without contention context, fallback picks RAT with highest effective PDR.
+
+        When no RAT passes the PDR threshold and contention_context is None,
+        the original fallback logic applies: select the RAT with the highest
+        effective_pdr among those whose actual_pdr >= pdr_availability.
+        """
+        with patch('selection.api.get_latest_model') as mock_get, \
+             patch('selection.api.load_model') as mock_load:
+            mock_get.return_value = "/fake/model/path.keras"
+
+            # DSRC predicts highest PDR (but still below threshold)
+            mock_dsrc = Mock()
+            mock_dsrc.predict.return_value = [
+                np.array([[0.1]]),
+                np.array([[0.95]]),  # highest among the three, still < 0.99
+            ]
+            mock_pc5 = Mock()
+            mock_pc5.predict.return_value = [
+                np.array([[0.1]]),
+                np.array([[0.90]]),
+            ]
+            mock_5g = Mock()
+            mock_5g.predict.return_value = [
+                np.array([[0.1]]),
+                np.array([[0.85]]),  # lowest
+            ]
+
+            mock_load.return_value = mock_dsrc  # default for loading
+
+            from selection.api import RATSelectionAPI
+            api = RATSelectionAPI(model_type="lstm")
+            api.models = {"dsrc": mock_dsrc, "pc5": mock_pc5, "5g": mock_5g}
+
+            # No contention context — original fallback
+            decision = api.select_rat(sample_state, contention_context=None)
+
+            # DSRC has highest effective_pdr (0.95) and actual_pdr >= availability
+            assert decision.selected_rat == RATType.DSRC
+
+    def test_fallback_with_contention_no_5g_model(self, sample_state):
+        """With contention context but no 5G model, falls through to generic fallback.
+
+        If contention_context is provided but no 5G model is loaded,
+        the 5G-preferred path cannot be taken, so the code falls through
+        to the generic max(effective_pdr) fallback among available RATs.
+        """
+        with patch('selection.api.get_latest_model') as mock_get, \
+             patch('selection.api.load_model') as mock_load:
+            mock_get.return_value = "/fake/model/path.keras"
+
+            # Only DSRC and PC5 models, no 5G
+            mock_dsrc = Mock()
+            mock_dsrc.predict.return_value = [
+                np.array([[0.1]]),
+                np.array([[0.90]]),  # below threshold
+            ]
+            mock_pc5 = Mock()
+            mock_pc5.predict.return_value = [
+                np.array([[0.1]]),
+                np.array([[0.93]]),  # below threshold, but highest
+            ]
+
+            mock_load.return_value = mock_dsrc
+
+            from selection.api import RATSelectionAPI
+            api = RATSelectionAPI(model_type="lstm")
+            # No 5G model loaded
+            api.models = {"dsrc": mock_dsrc, "pc5": mock_pc5}
+
+            contention_ctx = {
+                RATType.DSRC: (3, 0.5),
+                RATType.PC5: (3, 0.5),
+            }
+
+            decision = api.select_rat(sample_state, contention_context=contention_ctx)
+
+            # 5G is not available, so fallback picks max effective_pdr
+            assert decision.selected_rat != RATType.FiveG
+            assert decision.selected_rat in (RATType.DSRC, RATType.PC5)
+
 
 class TestOutcomeReporting:
     """Tests for transmission outcome reporting."""

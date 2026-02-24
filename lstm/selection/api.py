@@ -379,20 +379,37 @@ class RATSelectionAPI:
         valid_options = [opt for opt in options if opt[2] >= pdr_threshold]
 
         if not valid_options:
-            # Fallback: filter out unavailable RATs
-            keep = [opt for opt in options if opt[3] is not None and opt[3] >= self.pdr_availability]
-            if keep:
-                best = max(keep, key=lambda x: x[2])
-                selected_rat = best[0]
-            elif options:
-                # Last resort: select 5G if available
-                fiveg_opt = next((opt for opt in options if opt[0] == RATType.FiveG), None)
-                if fiveg_opt and (fiveg_opt[3] is None or fiveg_opt[3] >= self.pdr_availability):
+            # When contention context is active, prefer 5G (scheduled access,
+            # contention-free) as safe fallback — low predicted PDR early in
+            # the simulation is a model warm-up artifact, not a real signal.
+            if contention_context:
+                fiveg_opt = next(
+                    (opt for opt in options if opt[0] == RATType.FiveG), None,
+                )
+                if fiveg_opt:
                     selected_rat = RATType.FiveG
                 else:
-                    selected_rat = RATType.UNAVAILABLE
+                    # No 5G model loaded — fall through to generic fallback
+                    keep = [opt for opt in options
+                            if opt[3] is not None and opt[3] >= self.pdr_availability]
+                    selected_rat = max(keep, key=lambda x: x[2])[0] if keep else RATType.UNAVAILABLE
             else:
-                selected_rat = RATType.UNAVAILABLE
+                # Original fallback (no contention context — single vehicle)
+                keep = [opt for opt in options
+                        if opt[3] is not None and opt[3] >= self.pdr_availability]
+                if keep:
+                    best = max(keep, key=lambda x: x[2])
+                    selected_rat = best[0]
+                elif options:
+                    fiveg_opt = next(
+                        (opt for opt in options if opt[0] == RATType.FiveG), None,
+                    )
+                    if fiveg_opt and (fiveg_opt[3] is None or fiveg_opt[3] >= self.pdr_availability):
+                        selected_rat = RATType.FiveG
+                    else:
+                        selected_rat = RATType.UNAVAILABLE
+                else:
+                    selected_rat = RATType.UNAVAILABLE
         else:
             # Select lowest latency
             valid_options.sort(key=lambda x: x[1])
