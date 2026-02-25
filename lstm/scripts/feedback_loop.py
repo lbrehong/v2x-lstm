@@ -607,8 +607,9 @@ def run_multi_vehicle_loop(
     correction_exponent: float = 0.8,
     num_vehicles: int = 20,
     sim_tx_interval_ms: Optional[int] = None,
+    enable_contention: bool = True,
 ):
-    """Run multi-vehicle platoon simulation with contention effects.
+    """Run multi-vehicle platoon simulation with optional contention effects.
 
     Each vehicle has its own feature history, DTMC sizer, and queue simulator.
     Models and retraining buffers are shared globally.
@@ -620,7 +621,13 @@ def run_multi_vehicle_loop(
     ensure_dir_exists(OUTPUT_DIR)
     ensure_dir_exists(MODEL_DIR)
 
+    tag = "" if enable_contention else "_baseline"
+
     df = pd.read_csv(input_csv)
+    if not enable_contention:
+        print("\n" + "=" * 64)
+        print("BASELINE (no contention) pass")
+        print("=" * 64)
     print(f"Loaded {len(df)} rows from {input_csv}")
     print(f"Simulating {num_vehicles} vehicles\n")
 
@@ -728,7 +735,7 @@ def run_multi_vehicle_loop(
 
         # Phase 2.5: Re-select vehicles on overloaded RATs with contention context
         overloaded_rats = {r for r, u in utilization_per_rat.items() if u > 1.0}
-        if overloaded_rats:
+        if enable_contention and overloaded_rats:
             contention_ctx = {
                 rat_enum: (vehicles_per_rat.get(rat_enum, 0),
                            utilization_per_rat[rat_enum])
@@ -804,12 +811,18 @@ def run_multi_vehicle_loop(
                 vehicle_switches[v] += 1
             vehicle_prev_rat[v] = selected_rat
 
-            # Simulate with contention
+            # Simulate TX (with or without contention effects)
             utilization = utilization_per_rat[selected_rat]
-            delivered, sim_latency, contended_pdr = _simulate_tx_with_contention(
-                selected_rat, packet_size, decision.predicted_pdr,
-                base_packet_size, correction_exponent, n_on_rat, utilization,
-            )
+            if enable_contention:
+                delivered, sim_latency, contended_pdr = _simulate_tx_with_contention(
+                    selected_rat, packet_size, decision.predicted_pdr,
+                    base_packet_size, correction_exponent, n_on_rat, utilization,
+                )
+            else:
+                delivered, sim_latency, contended_pdr = _simulate_tx(
+                    selected_rat, packet_size, decision.predicted_pdr,
+                    base_packet_size, correction_exponent,
+                )
 
             # Feed outcome to this vehicle's queue simulator
             outcome = TransmissionOutcome(
@@ -904,28 +917,29 @@ def run_multi_vehicle_loop(
     # ----- Save outputs -----
 
     # Row-level log
-    log_path = os.path.join(OUTPUT_DIR, "feedback_multi_log.csv")
+    log_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_log.csv")
     pd.DataFrame(row_log).to_csv(log_path, index=False)
     print(f"\nRow log saved to {log_path}")
 
     # Retraining log
     if retrain_log:
-        rt_path = os.path.join(OUTPUT_DIR, "feedback_multi_retraining_log.csv")
+        rt_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_retraining_log.csv")
         pd.DataFrame(retrain_log).to_csv(rt_path, index=False)
         print(f"Retraining log saved to {rt_path}")
 
-    # Save final retrained models
-    for rat_str, model in api.models.items():
-        if retrain_count.get(rat_str, 0) > 0:
-            save_path = os.path.join(
-                MODEL_DIR,
-                f"retrained_{model_type}_{rat_str}_{int(time.time())}.keras",
-            )
-            model.save(save_path)
-            print(f"Final retrained model saved to {save_path}")
+    # Save final retrained models (only on contention pass)
+    if enable_contention:
+        for rat_str, model in api.models.items():
+            if retrain_count.get(rat_str, 0) > 0:
+                save_path = os.path.join(
+                    MODEL_DIR,
+                    f"retrained_{model_type}_{rat_str}_{int(time.time())}.keras",
+                )
+                model.save(save_path)
+                print(f"Final retrained model saved to {save_path}")
 
     # Contention log
-    ct_path = os.path.join(OUTPUT_DIR, "feedback_multi_contention.csv")
+    ct_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_contention.csv")
     pd.DataFrame(contention_log).to_csv(ct_path, index=False)
     print(f"Contention log saved to {ct_path}")
 
@@ -944,7 +958,7 @@ def run_multi_vehicle_loop(
                     "action": action,
                 })
     if dtmc_rows:
-        dtmc_path = os.path.join(OUTPUT_DIR, "feedback_multi_dtmc_transitions.csv")
+        dtmc_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_dtmc_transitions.csv")
         pd.DataFrame(dtmc_rows).to_csv(dtmc_path, index=False)
         print(f"DTMC transitions saved to {dtmc_path}")
 
@@ -1006,17 +1020,18 @@ def run_multi_vehicle_loop(
         **dtmc_agg,
     }
 
-    summary_path = os.path.join(OUTPUT_DIR, "feedback_multi_summary.csv")
+    summary_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_summary.csv")
     # Save summary + per-vehicle detail
     pd.DataFrame([summary]).to_csv(summary_path, index=False)
     pd.DataFrame(per_vehicle_rows).to_csv(
-        os.path.join(OUTPUT_DIR, "feedback_multi_per_vehicle.csv"), index=False,
+        os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_per_vehicle.csv"), index=False,
     )
     print(f"Summary saved to {summary_path}")
 
     # Print summary
     print("\n" + "=" * 64)
-    print(f"MULTI-VEHICLE FEEDBACK LOOP RESULTS ({num_vehicles} vehicles)")
+    mode_label = "CONTENTION" if enable_contention else "BASELINE (no contention)"
+    print(f"MULTI-VEHICLE FEEDBACK LOOP RESULTS — {mode_label} ({num_vehicles} vehicles)")
     print("=" * 64)
     print(f"  Time steps:            {len(df)}")
     print(f"  Total transmissions:   {total_packets}")
@@ -1031,6 +1046,20 @@ def run_multi_vehicle_loop(
     for k, v in dtmc_agg.items():
         print(f"  {k}: {v}")
     print("=" * 64)
+
+    # Automatically run baseline (no contention) pass for comparison
+    if enable_contention:
+        run_multi_vehicle_loop(
+            input_csv=input_csv,
+            model_type=model_type,
+            seed=seed,
+            retrain_interval=retrain_interval,
+            base_packet_size=base_packet_size,
+            correction_exponent=correction_exponent,
+            num_vehicles=num_vehicles,
+            sim_tx_interval_ms=sim_tx_interval_ms,
+            enable_contention=False,
+        )
 
     return summary
 
