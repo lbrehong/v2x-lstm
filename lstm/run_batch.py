@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
                       help="Base packet size in bytes (default: 1000)")
     opts.add_argument("--correction_exp", type=float, default=0.8,
                       help="PDR correction exponent (default: 0.8)")
-    opts.add_argument("--tx-interval", type=int, default=None,
+    opts.add_argument("--tx_interval", type=int, default=None,
                       help="Override TX interval in ms for all RATs (default: per-RAT from config)")
 
     skip = p.add_argument_group("Skip stages (applied to training run)")
