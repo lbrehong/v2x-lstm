@@ -321,6 +321,7 @@ def run_feedback_loop(
     retrain_interval: int = 500,
     base_packet_size: int = 1000,
     correction_exponent: float = 0.8,
+    sim_tx_interval_ms: Optional[int] = None,
 ):
     if seed is not None:
         random.seed(seed)
@@ -355,6 +356,7 @@ def run_feedback_loop(
 
     # Simulated time (seconds, incremented by TX_INTERVAL)
     sim_time = 0.0
+    sim_dt = (sim_tx_interval_ms / 1000.0) if sim_tx_interval_ms else 0.1
     successful_bytes = 0
     previous_rat: Optional[RATType] = None
     rat_switches = 0
@@ -373,7 +375,7 @@ def run_feedback_loop(
         selected_rat = decision.selected_rat
 
         if selected_rat == RATType.UNAVAILABLE:
-            sim_time += 0.1
+            sim_time += sim_dt
             continue
 
         rat_str = RAT_STR[selected_rat]
@@ -472,7 +474,7 @@ def run_feedback_loop(
         })
 
         # Advance simulated time
-        sim_time += 0.1  # 100 ms TX interval
+        sim_time += sim_dt
 
         # Progress
         if (idx + 1) % 500 == 0:
@@ -604,6 +606,7 @@ def run_multi_vehicle_loop(
     base_packet_size: int = 1000,
     correction_exponent: float = 0.8,
     num_vehicles: int = 20,
+    sim_tx_interval_ms: Optional[int] = None,
 ):
     """Run multi-vehicle platoon simulation with contention effects.
 
@@ -666,10 +669,12 @@ def run_multi_vehicle_loop(
     vehicle_prev_rat: List[Optional[RATType]] = [None] * num_vehicles
 
     sim_time = 0.0
+    sim_dt = (sim_tx_interval_ms / 1000.0) if sim_tx_interval_ms else 0.1
 
+    tx_label = f"{sim_tx_interval_ms}ms (override)" if sim_tx_interval_ms else "per-RAT defaults"
     print(f"Starting multi-vehicle feedback loop "
           f"({len(df)} time steps x {num_vehicles} vehicles, "
-          f"retrain every {retrain_interval})\n")
+          f"retrain every {retrain_interval}, TX interval: {tx_label})\n")
 
     for idx in range(len(df)):
         row = df.iloc[idx]
@@ -718,7 +723,7 @@ def run_multi_vehicle_loop(
             pkts = packets_per_rat.get(rat_enum, [])
             n = vehicles_per_rat.get(rat_enum, 0)
             utilization_per_rat[rat_enum] = compute_channel_utilization(
-                n, pkts, rat_enum,
+                n, pkts, rat_enum, tx_interval_ms=sim_tx_interval_ms,
             )
 
         # Phase 2.5: Re-select vehicles on overloaded RATs with contention context
@@ -768,7 +773,7 @@ def run_multi_vehicle_loop(
                 pkts = packets_per_rat.get(rat_enum, [])
                 n = vehicles_per_rat.get(rat_enum, 0)
                 utilization_per_rat[rat_enum] = compute_channel_utilization(
-                    n, pkts, rat_enum,
+                    n, pkts, rat_enum, tx_interval_ms=sim_tx_interval_ms,
                 )
 
         # Log contention for this time step
@@ -884,7 +889,7 @@ def run_multi_vehicle_loop(
                 )
                 buffers[rat_str_r] = []
 
-        sim_time += 0.1
+        sim_time += sim_dt
 
         # Progress
         if (idx + 1) % 500 == 0:
@@ -1047,6 +1052,8 @@ def main():
     parser.add_argument("--correction_exponent", type=float, default=0.8)
     parser.add_argument("--num_vehicles", type=int, default=1,
                         help="Number of vehicles in platoon (default: 1 = single-vehicle mode)")
+    parser.add_argument("--tx-interval", type=int, default=None,
+                        help="Override TX interval in ms for all RATs (default: per-RAT from config)")
     args = parser.parse_args()
 
     if args.num_vehicles > 1:
@@ -1058,6 +1065,7 @@ def main():
             base_packet_size=args.base_packet_size,
             correction_exponent=args.correction_exponent,
             num_vehicles=args.num_vehicles,
+            sim_tx_interval_ms=args.tx_interval,
         )
     else:
         run_feedback_loop(
@@ -1067,6 +1075,7 @@ def main():
             retrain_interval=args.retrain_interval,
             base_packet_size=args.base_packet_size,
             correction_exponent=args.correction_exponent,
+            sim_tx_interval_ms=args.tx_interval,
         )
 
 

@@ -7,7 +7,7 @@ including subframe capacity, TX budget, queue sizing, and transmission time esti
 All calculations are based on 3GPP/IEEE PHY-layer parameters defined in config.RAT_PHY_CONFIG.
 """
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -219,6 +219,7 @@ class ChannelAllocation:
 
 def compute_channel_utilization(
     n_vehicles: int, packet_sizes: List[int], rat: RATType,
+    tx_interval_ms: Optional[int] = None,
 ) -> float:
     """
     Compute channel utilization as total demand / capacity per TX interval.
@@ -227,13 +228,14 @@ def compute_channel_utilization(
         n_vehicles: Number of vehicles transmitting on this RAT
         packet_sizes: Packet size in bytes for each vehicle
         rat: The RAT type
+        tx_interval_ms: Override TX interval (uses per-RAT default if None)
 
     Returns:
         Utilization ratio (0.0+, can exceed 1.0 when overloaded)
     """
     if n_vehicles <= 0 or not packet_sizes:
         return 0.0
-    tx_interval = get_tx_interval_ms(rat)
+    tx_interval = tx_interval_ms if tx_interval_ms is not None else get_tx_interval_ms(rat)
     capacity_bytes = calculate_tx_capacity_bytes(rat, tx_interval)
     # PC5 capacity is per-subchannel; scale to full channel
     if rat.value == "pc5":

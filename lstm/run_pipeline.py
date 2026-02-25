@@ -98,6 +98,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="Base packet size in bytes (default: 1000)")
     fb.add_argument("--correction_exp", type=float, default=0.8,
                     help="PDR correction exponent (default: 0.8)")
+    fb.add_argument("--tx-interval", type=int, default=None,
+                    help="Override TX interval in ms for all RATs (default: per-RAT from config)")
 
     skip = p.add_argument_group("Skip stages")
     skip.add_argument("--skip_trimming", action="store_true")
@@ -424,6 +426,7 @@ def stage_feedback(args, merged_csv: str) -> None:
             base_packet_size=args.base_packet_size,
             correction_exponent=args.correction_exp,
             num_vehicles=args.num_vehicles,
+            sim_tx_interval_ms=args.tx_interval,
         )
     else:
         banner("Stage 5: Feedback loop (single vehicle)")
@@ -435,6 +438,7 @@ def stage_feedback(args, merged_csv: str) -> None:
             retrain_interval=args.retrain_interval,
             base_packet_size=args.base_packet_size,
             correction_exponent=args.correction_exp,
+            sim_tx_interval_ms=args.tx_interval,
         )
 
 

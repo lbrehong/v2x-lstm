@@ -72,6 +72,8 @@ def parse_args() -> argparse.Namespace:
                       help="Base packet size in bytes (default: 1000)")
     opts.add_argument("--correction_exp", type=float, default=0.8,
                       help="PDR correction exponent (default: 0.8)")
+    opts.add_argument("--tx-interval", type=int, default=None,
+                      help="Override TX interval in ms for all RATs (default: per-RAT from config)")
 
     skip = p.add_argument_group("Skip stages (applied to training run)")
     skip.add_argument("--skip_trimming", action="store_true")
@@ -191,6 +193,8 @@ def main() -> None:
         "--base_packet_size", str(args.base_packet_size),
         "--correction_exp", str(args.correction_exp),
     ]
+    if args.tx_interval is not None:
+        fb_args += ["--tx-interval", str(args.tx_interval)]
 
     skip_args = []
     if args.skip_trimming:
@@ -214,6 +218,8 @@ def main() -> None:
     if args.train_data:
         print(f"  Train data: {args.train_data}")
     print(f"  Infer data: {args.infer_data}")
+    if args.tx_interval:
+        print(f"  TX interval: {args.tx_interval}ms (all RATs)")
     print(f"  Total pipeline invocations: {total_runs}")
     if n_train:
         print(f"    - {n_train} training runs")
