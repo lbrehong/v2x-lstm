@@ -34,9 +34,10 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from keras.callbacks import EarlyStopping, Callback
 from keras.models import load_model
 
+import config
 from config import (
     TIMESTEPS, EPOCHS, BATCH_SIZE, VALIDATION_SPLIT,
-    get_tx_interval_ms, PDR_WINDOW, TARGET_COLS, MODEL_DIR, OUTPUT_DIR,
+    get_tx_interval_ms, PDR_WINDOW, TARGET_COLS, MODEL_DIR,
     FEATURES_COUNT,
 )
 from utils import find_files_with_string, get_latest_model, ensure_dir_exists
@@ -70,7 +71,7 @@ class MetricsLogger(Callback):
 
     def on_train_begin(self, logs=None):
         """Create CSV file with header at training start."""
-        filepath = os.path.join(OUTPUT_DIR, f"{self.filename}_{self.rat}_training_log.csv")
+        filepath = os.path.join(config.OUTPUT_DIR, f"{self.filename}_{self.rat}_training_log.csv")
         with open(filepath, mode='w', newline='') as file:
             writer = csv.writer(file)
             writer.writerow(["Epoch", "Time (seconds)",
@@ -106,7 +107,7 @@ class MetricsLogger(Callback):
         total_val_rmse = np.sqrt(total_val_loss) if total_val_loss else None
 
         # Append metrics to CSV
-        filepath = os.path.join(OUTPUT_DIR, f"{self.filename}_{self.rat}_training_log.csv")
+        filepath = os.path.join(config.OUTPUT_DIR, f"{self.filename}_{self.rat}_training_log.csv")
         with open(filepath, mode='a', newline='') as file:
             writer = csv.writer(file)
             writer.writerow([
@@ -245,7 +246,7 @@ def train_single_model(model_type, timesteps, features, X_train, y_train_dict, r
 def main():
     """Main training pipeline."""
     ensure_dir_exists(MODEL_DIR)
-    ensure_dir_exists(OUTPUT_DIR)
+    ensure_dir_exists(config.OUTPUT_DIR)
 
     args = parse_args()
 
@@ -302,7 +303,7 @@ def main():
 
     # Prepare training data
     X_train, y_train, X_new_data, y_new_data = prepare_data(
-        df, df_new, RAT, DATA_NPZ, OUTPUT_DIR)
+        df, df_new, RAT, DATA_NPZ, config.OUTPUT_DIR)
 
     # Convert targets to dictionary format for multi-output model
     y_train_dict = {
@@ -321,7 +322,7 @@ def main():
         model_path = get_latest_model(MODEL_TYPE, RAT)
         model = load_model(model_path, custom_objects={'rmse': rmse})
 
-        with open(os.path.join(OUTPUT_DIR, f"{MODEL_TYPE}_{RAT}_training_history.json"), "r") as f:
+        with open(os.path.join(config.OUTPUT_DIR, f"{MODEL_TYPE}_{RAT}_training_history.json"), "r") as f:
             history = json.load(f)
 
         print(f"{MODEL_TYPE.upper()} model loaded: {model_path}")
@@ -336,7 +337,7 @@ def main():
             MODEL_TYPE, TIMESTEPS, FEATURES, X_train, y_train_dict, RAT, epochs)
 
         # Persist training history as JSON for later analysis
-        with open(os.path.join(OUTPUT_DIR, f"{MODEL_TYPE}_{RAT}_training_history.json"), "w") as f:
+        with open(os.path.join(config.OUTPUT_DIR, f"{MODEL_TYPE}_{RAT}_training_history.json"), "w") as f:
             json.dump(history.history, f)
 
     # Incremental learning: retrain model with new data in streaming fashion
@@ -345,7 +346,7 @@ def main():
         print(f"Starting automatic incremental retraining for {MODEL_TYPE}...")
         print("=" * 60)
         automatic_train(model, X_new_data, y_new_data, 32, 500, 0.15,
-                        os.path.join(OUTPUT_DIR, f"prediction_log_{MODEL_TYPE}_{RAT}.csv"), RAT, MODEL_TYPE)
+                        os.path.join(config.OUTPUT_DIR, f"prediction_log_{MODEL_TYPE}_{RAT}.csv"), RAT, MODEL_TYPE)
     else:
         print("No new data provided. Skipping incremental retraining.")
 

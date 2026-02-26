@@ -40,8 +40,9 @@ from api_types import (
     RATType, NetworkState, TransmissionOutcome,
     RATDecision, PacketSizeDecision,
 )
+import config
 from config import (
-    TIMESTEPS, MODEL_DIR, OUTPUT_DIR,
+    TIMESTEPS, MODEL_DIR,
     create_latency_scaler_for_rat, TX_INTERVAL_MS,
 )
 from utils import row_to_network_state, ensure_dir_exists
@@ -327,7 +328,7 @@ def run_feedback_loop(
         random.seed(seed)
         np.random.seed(seed)
 
-    ensure_dir_exists(OUTPUT_DIR)
+    ensure_dir_exists(config.OUTPUT_DIR)
     ensure_dir_exists(MODEL_DIR)
 
     # Load data
@@ -517,13 +518,13 @@ def run_feedback_loop(
     # ----- Save outputs -----
 
     # Row-level log
-    log_path = os.path.join(OUTPUT_DIR, "feedback_loop_log.csv")
+    log_path = os.path.join(config.OUTPUT_DIR, "feedback_loop_log.csv")
     pd.DataFrame(row_log).to_csv(log_path, index=False)
     print(f"\nRow log saved to {log_path}")
 
     # Retraining log
     if retrain_log:
-        rt_path = os.path.join(OUTPUT_DIR, "feedback_loop_retraining_log.csv")
+        rt_path = os.path.join(config.OUTPUT_DIR, "feedback_loop_retraining_log.csv")
         pd.DataFrame(retrain_log).to_csv(rt_path, index=False)
         print(f"Retraining log saved to {rt_path}")
 
@@ -558,7 +559,7 @@ def run_feedback_loop(
                 "action": action,
             })
     if dtmc_rows:
-        dtmc_path = os.path.join(OUTPUT_DIR, "feedback_dtmc_transitions.csv")
+        dtmc_path = os.path.join(config.OUTPUT_DIR, "feedback_dtmc_transitions.csv")
         pd.DataFrame(dtmc_rows).to_csv(dtmc_path, index=False)
         print(f"DTMC transitions saved to {dtmc_path}")
 
@@ -594,7 +595,7 @@ def run_feedback_loop(
         **{f"rat_{k}": v for k, v in rat_dist.items()},
         **dtmc_stats,
     }
-    summary_path = os.path.join(OUTPUT_DIR, "feedback_loop_summary.csv")
+    summary_path = os.path.join(config.OUTPUT_DIR, "feedback_loop_summary.csv")
     pd.DataFrame([summary]).to_csv(summary_path, index=False)
     print(f"Summary saved to {summary_path}")
 
@@ -643,7 +644,7 @@ def run_multi_vehicle_loop(
         random.seed(seed)
         np.random.seed(seed)
 
-    ensure_dir_exists(OUTPUT_DIR)
+    ensure_dir_exists(config.OUTPUT_DIR)
     ensure_dir_exists(MODEL_DIR)
 
     tag = "" if enable_contention else "_baseline"
@@ -973,13 +974,13 @@ def run_multi_vehicle_loop(
     # ----- Save outputs -----
 
     # Row-level log
-    log_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_log.csv")
+    log_path = os.path.join(config.OUTPUT_DIR, f"feedback_multi{tag}_log.csv")
     pd.DataFrame(row_log).to_csv(log_path, index=False)
     print(f"\nRow log saved to {log_path}")
 
     # Retraining log
     if retrain_log:
-        rt_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_retraining_log.csv")
+        rt_path = os.path.join(config.OUTPUT_DIR, f"feedback_multi{tag}_retraining_log.csv")
         pd.DataFrame(retrain_log).to_csv(rt_path, index=False)
         print(f"Retraining log saved to {rt_path}")
 
@@ -995,7 +996,7 @@ def run_multi_vehicle_loop(
                 print(f"Final retrained model saved to {save_path}")
 
     # Contention log
-    ct_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_contention.csv")
+    ct_path = os.path.join(config.OUTPUT_DIR, f"feedback_multi{tag}_contention.csv")
     pd.DataFrame(contention_log).to_csv(ct_path, index=False)
     print(f"Contention log saved to {ct_path}")
 
@@ -1014,7 +1015,7 @@ def run_multi_vehicle_loop(
                     "action": action,
                 })
     if dtmc_rows:
-        dtmc_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_dtmc_transitions.csv")
+        dtmc_path = os.path.join(config.OUTPUT_DIR, f"feedback_multi{tag}_dtmc_transitions.csv")
         pd.DataFrame(dtmc_rows).to_csv(dtmc_path, index=False)
         print(f"DTMC transitions saved to {dtmc_path}")
 
@@ -1078,11 +1079,11 @@ def run_multi_vehicle_loop(
         **dtmc_agg,
     }
 
-    summary_path = os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_summary.csv")
+    summary_path = os.path.join(config.OUTPUT_DIR, f"feedback_multi{tag}_summary.csv")
     # Save summary + per-vehicle detail
     pd.DataFrame([summary]).to_csv(summary_path, index=False)
     pd.DataFrame(per_vehicle_rows).to_csv(
-        os.path.join(OUTPUT_DIR, f"feedback_multi{tag}_per_vehicle.csv"), index=False,
+        os.path.join(config.OUTPUT_DIR, f"feedback_multi{tag}_per_vehicle.csv"), index=False,
     )
     print(f"Summary saved to {summary_path}")
 

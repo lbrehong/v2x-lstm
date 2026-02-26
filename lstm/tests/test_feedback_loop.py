@@ -522,7 +522,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_feedback_loop(
@@ -555,7 +555,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             run_feedback_loop(
@@ -587,7 +587,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             run_feedback_loop(
@@ -618,7 +618,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_feedback_loop(
@@ -644,7 +644,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_feedback_loop(
@@ -670,7 +670,7 @@ class TestRunFeedbackLoop:
 
             with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
                  patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-                 patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+                 patch("config.OUTPUT_DIR", output_dir), \
                  patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
                 s = run_feedback_loop(
@@ -719,7 +719,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_feedback_loop(
@@ -745,7 +745,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_feedback_loop(
@@ -784,7 +784,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_feedback_loop(
@@ -809,7 +809,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_feedback_loop(
@@ -833,7 +833,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             run_feedback_loop(
@@ -867,7 +867,7 @@ class TestRunFeedbackLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             run_feedback_loop(
@@ -1134,7 +1134,7 @@ class TestRunMultiVehicleLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_multi_vehicle_loop(
@@ -1160,7 +1160,7 @@ class TestRunMultiVehicleLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             run_multi_vehicle_loop(
@@ -1186,7 +1186,7 @@ class TestRunMultiVehicleLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             run_multi_vehicle_loop(
@@ -1216,7 +1216,7 @@ class TestRunMultiVehicleLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_multi_vehicle_loop(
@@ -1247,7 +1247,7 @@ class TestRunMultiVehicleLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             run_multi_vehicle_loop(
@@ -1275,7 +1275,7 @@ class TestRunMultiVehicleLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_multi_vehicle_loop(
@@ -1298,7 +1298,7 @@ class TestRunMultiVehicleLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             run_multi_vehicle_loop(
@@ -1330,7 +1330,7 @@ class TestRunMultiVehicleLoop:
 
             with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
                  patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-                 patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+                 patch("config.OUTPUT_DIR", output_dir), \
                  patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
                 s = run_multi_vehicle_loop(
@@ -1378,7 +1378,7 @@ class TestRunMultiVehicleLoop:
 
         with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
              patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
-             patch("scripts.feedback_loop.OUTPUT_DIR", output_dir), \
+             patch("config.OUTPUT_DIR", output_dir), \
              patch("scripts.feedback_loop.MODEL_DIR", model_dir):
 
             summary = run_multi_vehicle_loop(

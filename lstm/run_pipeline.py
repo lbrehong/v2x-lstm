@@ -46,6 +46,8 @@ import pandas as pd
 _PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_PROJECT_DIR))
 
+import config
+
 
 def banner(msg: str) -> None:
     print()
@@ -358,7 +360,7 @@ def stage_selection(args) -> None:
     from learning.data_preprocessing import preprocess_lstm_input
     from learning.model import automatic_train, rmse
     from keras.models import load_model
-    from config import TIMESTEPS, TARGET_COLS, RATS, MODELS, OUTPUT_DIR
+    from config import TIMESTEPS, TARGET_COLS, RATS, MODELS
     from utils import get_latest_model
 
     INPUT = args.data
@@ -383,7 +385,7 @@ def stage_selection(args) -> None:
                 continue
             model_f = load_model(model_path, custom_objects={'rmse': rmse})
             automatic_train(model_f, X_new, y_new, 32, 200, 0.15,
-                            os.path.join(OUTPUT_DIR, f"final_log_{mt}_{rat}.csv"), rat, mt)
+                            os.path.join(config.OUTPUT_DIR, f"final_log_{mt}_{rat}.csv"), rat, mt)
             print(f"  {rat}: {mt} predictions done.")
 
     print("_ Processing done.")
@@ -449,10 +451,9 @@ def main(argv=None) -> None:
     os.chdir(_PROJECT_DIR)
 
     # Create timestamped run directory under output/
-    import config
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"run_{run_stamp}_{args.model}"
-    if not args.skip_feedback and args.num_vehicles > 1:
+    if not args.skip_feedback: #and args.num_vehicles > 1:
         run_name += f"_{args.num_vehicles}v"
     run_dir = os.path.join("output", run_name)
     os.makedirs(run_dir, exist_ok=True)
