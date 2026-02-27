@@ -29,3 +29,6 @@ bkp/
 10_03_singlemse/
 12_03-wrongpdr/
 /.claude/
+
+# Results viewer
+results.ipynb
