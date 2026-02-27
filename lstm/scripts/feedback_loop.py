@@ -415,9 +415,10 @@ def run_feedback_loop(
             pkt_decision = qsim.decide_packet_size(decision, sim_time)
             packet_size = pkt_decision.packet_size_bytes
 
-            # 4. Simulate transmission
+            # 4. Simulate transmission (use actual PDR from dataset as ceiling)
+            actual_pdr_val = _actual_pdr(state, selected_rat) or decision.predicted_pdr
             delivered, sim_latency, corrected_pdr = _simulate_tx(
-                selected_rat, packet_size, decision.predicted_pdr,
+                selected_rat, packet_size, actual_pdr_val,
                 base_packet_size, correction_exponent,
             )
 
@@ -868,10 +869,11 @@ def run_multi_vehicle_loop(
                     vehicle_switches[v] += 1
                 vehicle_prev_rat[v] = selected_rat
 
-                # Simulate TX — always with contention (both passes)
+                # Simulate TX — use actual PDR from dataset (unperturbed) as ceiling
+                actual_pdr_val = _actual_pdr(base_state, selected_rat) or decision.predicted_pdr
                 utilization = utilization_per_rat[selected_rat]
                 delivered, sim_latency, contended_pdr = _simulate_tx_with_contention(
-                    selected_rat, packet_size, decision.predicted_pdr,
+                    selected_rat, packet_size, actual_pdr_val,
                     base_packet_size, correction_exponent, n_on_rat, utilization,
                 )
 

@@ -208,6 +208,41 @@ def get_base_latency_ms(rat: RATType) -> float:
 # Multi-vehicle contention model (RB-consumption based)
 # =========================================================================
 
+
+def _bianchi_collision_probability(n: int, cw_min: int = 15,
+                                   cw_max: int = 1023) -> float:
+    """Bianchi (2000) saturated collision probability for 802.11 CSMA/CA.
+
+    Solves the fixed-point equations for transmission probability tau
+    and conditional collision probability p, accounting for exponential
+    backoff from CW_min to CW_max.
+
+    Args:
+        n: Number of contending stations
+        cw_min: Minimum contention window
+        cw_max: Maximum contention window
+
+    Returns:
+        Collision probability (0.0 for n <= 1)
+    """
+    if n <= 1:
+        return 0.0
+    m = int(np.log2(cw_max / cw_min))  # max backoff stage
+    tau = 2.0 / (cw_min + 1)  # initial guess
+    for _ in range(200):
+        p = 1.0 - (1.0 - tau) ** (n - 1)
+        p = min(p, 0.9999)
+        num = 2.0 * (1.0 - 2.0 * p)
+        denom = ((1.0 - 2.0 * p) * (cw_min + 1)
+                 + p * cw_min * (1.0 - (2.0 * p) ** m))
+        if abs(denom) < 1e-12:
+            break
+        tau_new = max(0.0001, min(0.999, num / denom))
+        if abs(tau_new - tau) < 1e-12:
+            break
+        tau = tau_new
+    return 1.0 - (1.0 - tau) ** (n - 1)
+
 @dataclass
 class ChannelAllocation:
     """Result of channel allocation for a single vehicle."""
@@ -309,20 +344,20 @@ def allocate_channel(
                     results[i] = ChannelAllocation(i, transmitted=False, collision=True, deferred=False)
         return results
 
-    # DSRC (CSMA/CA): probabilistic collision based on utilization + CW
+    # DSRC (CSMA/CA): Bianchi collision probability scaled by utilization²
     cw_min = config.get("contention_window_min", 15)
+    cw_max = config.get("contention_window_max", 1023)
     utilization = compute_channel_utilization(n, vehicle_demands, rat)
+
+    p_coll_saturated = _bianchi_collision_probability(n, cw_min, cw_max)
+    u = min(utilization, 1.0)
+    p_coll = p_coll_saturated * u * u
+    # Beyond capacity: increase collision probability
+    if utilization > 1.0:
+        p_coll = min(1.0, 1.0 - (1.0 - p_coll) * max(0.05, 1.0 / utilization))
 
     results = []
     for i in range(n):
-        if n <= 1:
-            p_coll = 0.0
-        else:
-            # Bianchi-inspired: prob at least one other picks same slot
-            p_coll = (1.0 - ((cw_min - 1) / cw_min) ** (n - 1)) * min(utilization, 1.0)
-            # When overloaded, collisions rise sharply
-            if utilization > 1.0:
-                p_coll = min(1.0, p_coll + (utilization - 1.0) * 0.3)
         collided = rng.random() < p_coll
         results.append(ChannelAllocation(i, transmitted=not collided, collision=collided, deferred=False))
     return results
@@ -365,15 +400,20 @@ def compute_contention_pdr(
         p_no_collision = ((resources - 1) / resources) ** (n_vehicles - 1)
         return base_pdr * p_no_collision
 
-    # DSRC (CSMA/CA)
+    # DSRC (CSMA/CA): Bianchi collision probability scaled by utilization².
+    # At low utilization vehicles rarely contend simultaneously (CSMA
+    # listen-before-talk), so collision probability scales as util².
+    # At saturation (util=1) this equals the full Bianchi probability.
     cw_min = config.get("contention_window_min", 15)
-    p_success_slot = ((cw_min - 1) / cw_min) ** (n_vehicles - 1)
-    # Scale by utilization: at low utilization, contention is mild
-    p_success = p_success_slot ** min(utilization, 1.0)
-    # When overloaded, additional sharp degradation
+    cw_max = config.get("contention_window_max", 1023)
+    p_coll_saturated = _bianchi_collision_probability(n_vehicles, cw_min, cw_max)
+    u = min(utilization, 1.0)
+    p_coll = p_coll_saturated * u * u
+    p_success = 1.0 - p_coll
+    # Beyond capacity: hard degradation
     if utilization > 1.0:
-        p_success *= max(0.1, 1.0 / utilization)
-    return base_pdr * p_success
+        p_success *= max(0.05, 1.0 / utilization)
+    return base_pdr * max(0.0, p_success)
 
 
 def compute_contention_latency(

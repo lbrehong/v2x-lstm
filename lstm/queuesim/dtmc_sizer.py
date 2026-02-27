@@ -214,8 +214,10 @@ def correct_pdr_for_packet_size(
     if base_pdr <= 0:
         return 0.0
 
-    if base_pdr >= 1.0:
-        return 1.0
+    # Cap at 0.999 so the correction remains sensitive when PDR ≈ 1.0.
+    # A measured PDR of 1.0 means "no losses observed", not BER = 0;
+    # capping preserves the power-law relationship for larger packets.
+    base_pdr = min(base_pdr, 0.999)
 
     # Size ratio determines the exponent
     # Larger target -> higher exponent -> lower PDR (more bits to fail)
