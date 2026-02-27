@@ -868,18 +868,12 @@ def run_multi_vehicle_loop(
                     vehicle_switches[v] += 1
                 vehicle_prev_rat[v] = selected_rat
 
-                # Simulate TX (with or without contention effects)
+                # Simulate TX — always with contention (both passes)
                 utilization = utilization_per_rat[selected_rat]
-                if enable_contention:
-                    delivered, sim_latency, contended_pdr = _simulate_tx_with_contention(
-                        selected_rat, packet_size, decision.predicted_pdr,
-                        base_packet_size, correction_exponent, n_on_rat, utilization,
-                    )
-                else:
-                    delivered, sim_latency, contended_pdr = _simulate_tx(
-                        selected_rat, packet_size, decision.predicted_pdr,
-                        base_packet_size, correction_exponent,
-                    )
+                delivered, sim_latency, contended_pdr = _simulate_tx_with_contention(
+                    selected_rat, packet_size, decision.predicted_pdr,
+                    base_packet_size, correction_exponent, n_on_rat, utilization,
+                )
 
                 # Feed outcome to this vehicle's queue simulator
                 outcome = TransmissionOutcome(
