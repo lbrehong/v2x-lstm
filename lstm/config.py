@@ -218,32 +218,21 @@ def create_gps_scaler():
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_LAT, MIN_LON], [MAX_LAT, MAX_LON]])
 
 
-def create_latency_scaler():
+def create_latency_scaler(rat: str = None):
     """
-    Create global latency scaler (fallback, [0, 300ms]).
+    Create latency scaler, optionally per-RAT for tighter bounds.
 
-    Prefer ``create_latency_scaler_for_rat(rat)`` for tighter per-RAT bounds.
+    When ``rat`` is provided, uses per-RAT bounds from ``LATENCY_BOUNDS``
+    which expand the useful normalized range into sigmoid's high-gradient
+    zone, improving training signal. Falls back to global [0, 300ms] bounds.
+
+    Args:
+        rat: RAT identifier ('5g', 'pc5', 'dsrc'), or None for global fallback
 
     Returns:
         Fitted MinMaxScaler for latency values
     """
-    return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_LATENCY], [MAX_LATENCY]])
-
-
-def create_latency_scaler_for_rat(rat: str):
-    """
-    Create per-RAT latency scaler with tighter bounds.
-
-    Tighter bounds expand the useful normalized range into sigmoid's
-    high-gradient zone, improving training signal.
-
-    Args:
-        rat: RAT identifier ('5g', 'pc5', 'dsrc')
-
-    Returns:
-        Fitted MinMaxScaler for the RAT's latency range
-    """
-    lo, hi = LATENCY_BOUNDS.get(rat, (MIN_LATENCY, MAX_LATENCY))
+    lo, hi = LATENCY_BOUNDS.get(rat, (MIN_LATENCY, MAX_LATENCY)) if rat else (MIN_LATENCY, MAX_LATENCY)
     return MinMaxScaler(feature_range=(0, 1)).fit([[lo], [hi]])
 
 
@@ -305,12 +294,15 @@ def create_rsrp_dsrc_scaler():
     return MinMaxScaler(feature_range=(0, 1)).fit([[MIN_RSRP_DSRC], [MAX_RSRP_DSRC]])
 
 
-def create_all_scalers():
+def create_all_scalers(rat: str = None):
     """
     Create dictionary of all scalers for complete preprocessing pipeline.
 
     GPS coordinates share a single 2D scaler to maintain spatial relationship.
     Each other feature has its own independent scaler.
+
+    Args:
+        rat: RAT identifier ('5g', 'pc5', 'dsrc'), or None for global fallback
 
     Returns:
         Dictionary mapping column names to fitted MinMaxScaler objects
@@ -319,7 +311,7 @@ def create_all_scalers():
     return {
         'tx_latitude': gps_scaler,
         'tx_longitude': gps_scaler,  # Same scaler as latitude for 2D transform
-        'latency_ms': create_latency_scaler(),
+        'latency_ms': create_latency_scaler(rat),
         'throughput': create_throughput_scaler(),
         'pdr': create_pdr_scaler(),
         'sinr': create_sinr_5g_scaler(),

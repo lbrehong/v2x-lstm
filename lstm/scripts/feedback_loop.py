@@ -43,7 +43,7 @@ from api_types import (
 import config
 from config import (
     TIMESTEPS, MODEL_DIR,
-    create_latency_scaler_for_rat, TX_INTERVAL_MS,
+    create_latency_scaler, TX_INTERVAL_MS,
 )
 from utils import row_to_network_state, ensure_dir_exists
 from selection.api import RATSelectionAPI
@@ -342,7 +342,7 @@ def run_feedback_loop(
         correction_exponent=correction_exponent,
     )
     latency_scalers = {
-        rat: create_latency_scaler_for_rat(rat) for rat in ("5g", "pc5", "dsrc")
+        rat: create_latency_scaler(rat) for rat in ("5g", "pc5", "dsrc")
     }
 
     # Per-RAT retraining buffers:  list of (sequence, y_latency_norm, y_pdr)
@@ -661,7 +661,7 @@ def run_multi_vehicle_loop(
     # Shared components
     api = RATSelectionAPI(model_type=model_type)
     latency_scalers = {
-        rat: create_latency_scaler_for_rat(rat) for rat in ("5g", "pc5", "dsrc")
+        rat: create_latency_scaler(rat) for rat in ("5g", "pc5", "dsrc")
     }
 
     # Per-vehicle components

@@ -15,7 +15,7 @@ from tqdm import tqdm
 from config import (
     MIN_LAT, MIN_LON,
     FEATURE_COLS, TARGET_COLS,
-    create_all_scalers, create_latency_scaler_for_rat,
+    create_all_scalers,
 )
 
 
@@ -146,9 +146,7 @@ def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
         raise ValueError(f"Invalid RAT type: {rat}. Must be '5g', 'pc5', or 'dsrc'.")
 
     feature_cols = FEATURE_COLS[rat]
-    scalers = create_all_scalers()
-    # Override global latency scaler with per-RAT bounds for tighter normalization
-    scalers['latency_ms'] = create_latency_scaler_for_rat(rat)
+    scalers = create_all_scalers(rat)
     gps_scaler = scalers['tx_latitude']
 
     # Select only the columns needed for this RAT
@@ -225,8 +223,8 @@ def inverse_transform(scalers, csv):
     log_df['actual_latency'] = scalers['latency_ms'].inverse_transform(log_df[['actual_latency']])
 
     # Inverse transform PDR values
-    log_df['pred_pdr'] = scalers['pdr'].inverse_transform(log_df['pred_pdr'])
-    log_df['actual_pdr'] = scalers['pdr'].inverse_transform(log_df['actual_pdr'])
+    log_df['pred_pdr'] = scalers['pdr'].inverse_transform(log_df[['pred_pdr']])
+    log_df['actual_pdr'] = scalers['pdr'].inverse_transform(log_df[['actual_pdr']])
 
     # MAE and RMSE columns are already in original units — leave as-is
 

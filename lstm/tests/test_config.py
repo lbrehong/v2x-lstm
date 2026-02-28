@@ -14,7 +14,7 @@ from config import (
     MIN_SINR_5G, MAX_SINR_5G, MIN_RSRP_5G, MAX_RSRP_5G,
     MIN_RSRP_DSRC, MAX_RSRP_DSRC,
     FEATURE_COLS, TARGET_COLS, FEATURES_COUNT,
-    create_gps_scaler, create_latency_scaler, create_latency_scaler_for_rat,
+    create_gps_scaler, create_latency_scaler,
     create_pdr_scaler,
     create_throughput_scaler, create_sinr_5g_scaler,
     create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
@@ -166,14 +166,14 @@ class TestPerRatLatencyScaler:
     def test_per_rat_scaler_creation(self):
         """Per-RAT latency scalers should be created for all RATs."""
         for rat in ("5g", "pc5", "dsrc"):
-            scaler = create_latency_scaler_for_rat(rat)
+            scaler = create_latency_scaler(rat)
             assert scaler is not None
 
     def test_per_rat_scaler_bounds(self):
         """Per-RAT scalers should use tighter bounds than global."""
         global_scaler = create_latency_scaler()
         for rat in ("5g", "pc5", "dsrc"):
-            rat_scaler = create_latency_scaler_for_rat(rat)
+            rat_scaler = create_latency_scaler(rat)
             # 50ms should scale higher with per-RAT scaler (tighter bounds)
             global_val = global_scaler.transform([[50.0]])[0][0]
             rat_val = rat_scaler.transform([[50.0]])[0][0]
@@ -182,7 +182,7 @@ class TestPerRatLatencyScaler:
     def test_per_rat_scaler_roundtrip(self):
         """Per-RAT scalers should correctly roundtrip values."""
         for rat in ("5g", "pc5", "dsrc"):
-            scaler = create_latency_scaler_for_rat(rat)
+            scaler = create_latency_scaler(rat)
             original = np.array([[15.0]])
             scaled = scaler.transform(original)
             recovered = scaler.inverse_transform(scaled)
@@ -190,7 +190,7 @@ class TestPerRatLatencyScaler:
 
     def test_unknown_rat_falls_back(self):
         """Unknown RAT should fall back to global bounds."""
-        scaler = create_latency_scaler_for_rat("unknown")
+        scaler = create_latency_scaler("unknown")
         global_scaler = create_latency_scaler()
         val = scaler.transform([[50.0]])[0][0]
         global_val = global_scaler.transform([[50.0]])[0][0]

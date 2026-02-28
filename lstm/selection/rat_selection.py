@@ -38,7 +38,7 @@ from selection.file_integration import process_batch
 
 # Initialize scalers for coordinate and latency transformations
 gps_scaler = create_gps_scaler()
-latency_scaler = create_latency_scaler()
+latency_scalers = {rat: create_latency_scaler(rat) for rat in ("5g", "pc5", "dsrc")}
 
 
 def grab_gps(df):
@@ -91,7 +91,7 @@ def get_predictions(model, rat, gps_data):
 
     pred_latency, pred_pdr = predictions[:, 0].flatten(), predictions[:, 1].flatten()
     pred_latency = np.clip(pred_latency, 0.0, 1.0)
-    latency = latency_scaler.inverse_transform(np.array(pred_latency).reshape(-1, 1)).flatten()
+    latency = latency_scalers[rat].inverse_transform(np.array(pred_latency).reshape(-1, 1)).flatten()
     pdr = np.clip(pred_pdr, 0.0, 1.0)
 
     print("First few latency predictions:", latency[:5])

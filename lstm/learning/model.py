@@ -266,7 +266,7 @@ def automatic_train(model, X_new_data, y_new_data, batch_size=32, N=500, validat
     """
     # Initialize scalers for inverse transformation of predictions
     gps_scaler = create_gps_scaler()
-    latency_scaler = create_latency_scaler()
+    latency_scaler = create_latency_scaler(rat)
 
     # Initialize prediction log file with header
     with open(log_file, "w") as f:

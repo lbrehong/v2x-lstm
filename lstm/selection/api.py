@@ -23,7 +23,7 @@ from config import (
     MODEL_DIR, OUTPUT_DIR, TIMESTEPS, TARGET_COLS,
     PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS,
     PACKET_SIZE_BOUNDS,
-    create_gps_scaler, create_latency_scaler, create_latency_scaler_for_rat,
+    create_gps_scaler, create_latency_scaler,
     create_sinr_5g_scaler, create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
 )
 from queuesim.phy_layer import compute_contention_pdr
@@ -64,7 +64,7 @@ class RATSelectionAPI:
         self.gps_scaler = create_gps_scaler()
         self.latency_scaler = create_latency_scaler()  # global fallback
         self.latency_scalers = {
-            rat: create_latency_scaler_for_rat(rat)
+            rat: create_latency_scaler(rat)
             for rat in ("5g", "pc5", "dsrc")
         }
         self.sinr_5g_scaler = create_sinr_5g_scaler()
