@@ -15,6 +15,7 @@ from config import (
     DTMC_THRESHOLD_HIGH, DTMC_THRESHOLD_LOW,
     DTMC_WINDOW_SECONDS,
     DEFAULT_TX_INTERVAL_MS,
+    PDR_CORRECTION_EXPONENT,
 )
 
 
@@ -186,8 +187,7 @@ def correct_pdr_for_packet_size(
     base_pdr: float,
     base_size: int,
     target_size: int,
-    #correction_exponent: float = 0.8
-    correction_exponent: float = 1.0 # Default to 1.0 for direct power-law, can be tuned based on empirical data
+    correction_exponent: float = PDR_CORRECTION_EXPONENT
 ) -> float:
     """
     Apply packet size correction to PDR estimate.

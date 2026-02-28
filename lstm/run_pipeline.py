@@ -98,8 +98,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="Random seed for reproducibility")
     fb.add_argument("--base_packet_size", type=int, default=1000,
                     help="Base packet size in bytes (default: 1000)")
-    fb.add_argument("--correction_exp", type=float, default=0.8,
-                    help="PDR correction exponent (default: 0.8)")
+    fb.add_argument("--correction_exp", type=float, default=config.PDR_CORRECTION_EXPONENT,
+                    help="PDR correction exponent (default: 1.0)")
     fb.add_argument("--tx-interval", type=int, default=None,
                     help="Override TX interval in ms for all RATs (default: per-RAT from config)")
 

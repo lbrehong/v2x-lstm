@@ -193,7 +193,7 @@ class TestSimulateTx:
             packet_size=1000,
             predicted_pdr=0.95,
             base_packet_size=1000,
-            correction_exponent=0.8,
+            correction_exponent=1.0,
         )
         assert isinstance(delivered, bool)
         assert isinstance(latency, float)

@@ -42,7 +42,7 @@ from api_types import (
     RATType, NetworkState, QueueContext, RATDecision,
     PacketSizeDecision, TransmissionOutcome,
 )
-from config import OUTPUT_DIR, DEFAULT_TX_INTERVAL_MS, get_tx_interval_ms
+from config import OUTPUT_DIR, DEFAULT_TX_INTERVAL_MS, get_tx_interval_ms, PDR_CORRECTION_EXPONENT
 from utils import row_to_network_state
 
 # Import from sub-modules
@@ -81,7 +81,7 @@ class QueueSimulator:
     def __init__(
         self,
         base_packet_size: int = 1000,
-        correction_exponent: float = 0.8,
+        correction_exponent: float = PDR_CORRECTION_EXPONENT,
         target_latency_ms: float = 20.0,
         target_pdr: float = 0.99,
         enforce_phy_limits: bool = True,
@@ -382,7 +382,7 @@ class IntegratedQueueSimulator:
         network_data: Optional[pd.DataFrame] = None,
         arrival_rate_hz: float = 1000 / DEFAULT_TX_INTERVAL_MS,
         base_packet_size: int = 1000,
-        correction_exponent: float = 0.8,
+        correction_exponent: float = PDR_CORRECTION_EXPONENT,
         seed: Optional[int] = None,
         enforce_phy_limits: bool = True,
     ):
@@ -838,7 +838,7 @@ def run_standalone(
     output_csv: str,
     arrival_rate_hz: float = 1000 / DEFAULT_TX_INTERVAL_MS,
     base_packet_size: int = 1000,
-    correction_exponent: float = 0.8,
+    correction_exponent: float = PDR_CORRECTION_EXPONENT,
     seed: Optional[int] = None,
     enforce_phy_limits: bool = True,
 ):

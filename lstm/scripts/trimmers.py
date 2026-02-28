@@ -207,7 +207,7 @@ def trim_sa(file_list, output_file, path, th=None, xmin=None, xmax=None):
                 saved_sinr = sinr
                 saved_rsrp = rsrp
 
-            sa_data[int(float(timestamp)) * 1000] = (latitude, longitude)
+            sa_data[int(float(timestamp)) // 1000] = (latitude, longitude)
 
             outfile.write(f"{tx_seq_num},{timestamp},{latitude},{longitude},{latency},{sinr},{rsrp}\n")
             out += 1

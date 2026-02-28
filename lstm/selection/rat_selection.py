@@ -182,6 +182,11 @@ def select_best_rat(row, model_type):
         ("5g", row[f"pred_latency_ms_5g_{model_type}"], row[f"pred_pdr_5g_{model_type}"], row["pdr_5g"]),
     ]
 
+    # Filter out options with NaN predictions
+    options = [opt for opt in options if pd.notna(opt[1]) and pd.notna(opt[2]) and pd.notna(opt[3])]
+    if not options:
+        return "NaN"
+
     # Filter by PDR reliability threshold
     valid_options = [opt for opt in options if opt[2] >= PDR_RELIABILITY_THRESHOLD]
     if not valid_options:
@@ -189,10 +194,12 @@ def select_best_rat(row, model_type):
         keep = [opt for opt in options if opt[3] >= PDR_AVAILABILITY_THRESHOLD]
         if keep:
             best_rat = max(keep, key=lambda x: x[2])[0]
-        elif options[2][3] >= PDR_AVAILABILITY_THRESHOLD:
-            best_rat = "5g"
         else:
-            best_rat = "NaN"
+            fiveg = next((opt for opt in options if opt[0] == "5g"), None)
+            if fiveg and fiveg[3] >= PDR_AVAILABILITY_THRESHOLD:
+                best_rat = "5g"
+            else:
+                best_rat = "NaN"
     else:
         # Select lowest latency
         valid_options.sort(key=lambda x: x[1])
@@ -244,13 +251,12 @@ def opportunistic_best_rat(df):
                 best_rat_list.append(best_rat)
                 previous_rat = best_rat
                 continue
-            elif options[2][2] > PDR_AVAILABILITY_THRESHOLD:
-                best_rat = "5g"
-                best_rat_list.append(best_rat)
-                previous_rat = best_rat
-                continue
             else:
-                best_rat = "NaN"
+                fiveg = next((opt for opt in options if opt[0] == "5g"), None)
+                if fiveg and fiveg[2] > PDR_AVAILABILITY_THRESHOLD:
+                    best_rat = "5g"
+                else:
+                    best_rat = "NaN"
                 best_rat_list.append(best_rat)
                 previous_rat = best_rat
                 continue
@@ -261,10 +267,12 @@ def opportunistic_best_rat(df):
             best_rat = min(valid_options, key=lambda x: x[1])[0]
         elif any(rat[0] == previous_rat for rat in valid_options):
             best_rat = previous_rat
-        elif options[2][2] > PDR_AVAILABILITY_THRESHOLD:
-            best_rat = "5g"
         else:
-            best_rat = "NaN"
+            fiveg = next((opt for opt in options if opt[0] == "5g"), None)
+            if fiveg and fiveg[2] > PDR_AVAILABILITY_THRESHOLD:
+                best_rat = "5g"
+            else:
+                best_rat = "NaN"
 
         best_rat_list.append(best_rat)
         previous_rat = best_rat
@@ -320,11 +328,15 @@ def process_file(input_csv, model_type, output_csv, input_dir):
     print("First few GPS entries:\n", df[:5])
 
     df_pred = pd.DataFrame()
-    df_pred["latency_DSRC"], df_pred["PDR_DSRC"] = get_predictions(model_dsrc, "dsrc", df)
-    df_pred["latency_CV2X"], df_pred["PDR_CV2X"] = get_predictions(model_cv2x, "pc5", df)
-    df_pred["latency_5G"], df_pred["PDR_5G"] = get_predictions(model_5g, "5g", df)
+    df_pred[f"pred_latency_ms_dsrc_{model_type}"], df_pred[f"pred_pdr_dsrc_{model_type}"] = get_predictions(model_dsrc, "dsrc", df)
+    df_pred[f"pred_latency_ms_pc5_{model_type}"], df_pred[f"pred_pdr_pc5_{model_type}"] = get_predictions(model_cv2x, "pc5", df)
+    df_pred[f"pred_latency_ms_5g_{model_type}"], df_pred[f"pred_pdr_5g_{model_type}"] = get_predictions(model_5g, "5g", df)
 
-    df[f"Best_RAT_{model_type}"] = df_pred.apply(select_best_rat, axis=1)
+    # Add actual PDR columns (required by select_best_rat fallback)
+    for rat in ("dsrc", "pc5", "5g"):
+        df_pred[f"pdr_{rat}"] = df_pred[f"pred_pdr_{rat}_{model_type}"]
+
+    df[f"Best_RAT_{model_type}"] = df_pred.apply(lambda row: select_best_rat(row, model_type), axis=1)
 
     output_path = os.path.join(input_dir, f"output_{input_csv}")
     df.to_csv(output_path, index=False)

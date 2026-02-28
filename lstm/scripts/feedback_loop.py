@@ -42,7 +42,7 @@ from api_types import (
 )
 import config
 from config import (
-    TIMESTEPS, MODEL_DIR,
+    TIMESTEPS, MODEL_DIR, PDR_CORRECTION_EXPONENT,
     create_latency_scaler, TX_INTERVAL_MS,
 )
 from utils import row_to_network_state, ensure_dir_exists
@@ -219,9 +219,17 @@ def _retrain_model(
     # Save weights for potential rollback
     weights_before = model.get_weights()
 
-    # Apply gradient clipping if not already set
+    # Recompile optimizer with gradient clipping if not already set
     if not getattr(model.optimizer, "clipnorm", None):
-        model.optimizer.clipnorm = 1.0
+        from keras.optimizers import Adam
+        from learning.model import rmse
+        lr = float(model.optimizer.learning_rate)
+        model.compile(
+            optimizer=Adam(learning_rate=lr, clipnorm=1.0),
+            loss={"latency_ms": "mse", "pdr": "mse"},
+            loss_weights={"latency_ms": 1.0, "pdr": 1.5},
+            metrics={"latency_ms": [rmse], "pdr": [rmse]},
+        )
 
     # Evaluate loss before retraining
     # Returns [total_loss, latency_loss, pdr_loss, latency_rmse, pdr_rmse]
@@ -321,7 +329,7 @@ def run_feedback_loop(
     seed: Optional[int] = None,
     retrain_interval: int = 500,
     base_packet_size: int = 1000,
-    correction_exponent: float = 0.8,
+    correction_exponent: float = PDR_CORRECTION_EXPONENT,
     sim_tx_interval_ms: Optional[int] = None,
 ):
     if seed is not None:
@@ -631,7 +639,7 @@ def run_multi_vehicle_loop(
     seed: Optional[int] = None,
     retrain_interval: int = 500,
     base_packet_size: int = 1000,
-    correction_exponent: float = 0.8,
+    correction_exponent: float = PDR_CORRECTION_EXPONENT,
     num_vehicles: int = 20,
     sim_tx_interval_ms: Optional[int] = None,
     enable_contention: bool = True,
@@ -753,13 +761,16 @@ def run_multi_vehicle_loop(
             for v in range(num_vehicles):
                 state_v = _perturb_state(base_state, vehicle_rngs[v])
 
-                # Swap in this vehicle's history
-                api._history = vehicle_histories[v]
+                # Swap in this vehicle's history (copy lists so api doesn't
+                # hold a reference into vehicle_histories)
+                api._history = {
+                    k: list(v_list) for k, v_list in vehicle_histories[v].items()
+                }
 
                 queue_ctx = vehicle_qsims[v].get_queue_context()
                 decision = api.select_rat(state_v, queue_ctx)
 
-                # Save updated history back
+                # Save updated history back (new dict, decoupled from api)
                 vehicle_histories[v] = api._history
 
                 if decision.selected_rat == RATType.UNAVAILABLE:
@@ -803,20 +814,17 @@ def run_multi_vehicle_loop(
                     if vehicle_rats[v] not in overloaded_rats:
                         continue
                     state_v = _perturb_state(base_state, vehicle_rngs[v])
-                    # Restore history but save a copy — select_rat calls
-                    # _build_sequence which appends features for all RATs.
-                    # Pass 1 already appended, so we restore after re-selection.
-                    api._history = vehicle_histories[v]
-                    saved_history = {
-                        k: list(v_list) for k, v_list in api._history.items()
+                    # Copy history into api for re-selection. select_rat will
+                    # append to api._history, but we discard those changes to
+                    # avoid double-appending (Pass 1 already appended).
+                    api._history = {
+                        k: list(v_list) for k, v_list in vehicle_histories[v].items()
                     }
                     queue_ctx = vehicle_qsims[v].get_queue_context()
                     new_decision = api.select_rat(
                         state_v, queue_ctx, contention_context=contention_ctx,
                     )
-                    # Restore history to avoid double-appending from Pass 1
-                    api._history = saved_history
-                    vehicle_histories[v] = saved_history
+                    # Discard history changes from re-selection (keep Pass 1 history)
                     if new_decision.selected_rat == RATType.UNAVAILABLE:
                         continue
                     decisions[v] = new_decision
@@ -1134,7 +1142,7 @@ def main():
     parser.add_argument("--retrain_interval", type=int, default=500,
                         help="Samples per RAT before retraining (default: 500)")
     parser.add_argument("--base_packet_size", type=int, default=1000)
-    parser.add_argument("--correction_exponent", type=float, default=0.8)
+    parser.add_argument("--correction_exponent", type=float, default=PDR_CORRECTION_EXPONENT)
     parser.add_argument("--num_vehicles", type=int, default=1,
                         help="Number of vehicles in platoon (default: 1 = single-vehicle mode)")
     parser.add_argument("--tx-interval", type=int, default=None,

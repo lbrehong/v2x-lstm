@@ -76,11 +76,12 @@ PACKET_SIZE_BOUNDS = {
 # DTMC (Discrete Time Markov Chain) Packet Sizing Parameters
 # Packet sizes: 1024 -> 2048 -> 3072 -> 4096 bytes (increments of 1024)
 DTMC_PACKET_SIZES = [1024, 2048, 3072, 4096]  # Explicit size levels
-DTMC_THRESHOLD_HIGH = 0.99  # PDR above this -> increase packet size
-DTMC_THRESHOLD_LOW = 0.95   # PDR below this -> decrease packet size
-DTMC_WINDOW_SECONDS = 1.0   # Moving window for PDR averaging (seconds)
-DTMC_P_UP = 1.0             # Deterministic transitions (no randomness)
-DTMC_P_DOWN = 1.0           # Deterministic transitions (no randomness)
+DTMC_THRESHOLD_HIGH = 0.99    # PDR above this -> increase packet size
+DTMC_THRESHOLD_LOW = 0.95     # PDR below this -> decrease packet size
+DTMC_WINDOW_SECONDS = 1.0     # Moving window for PDR averaging (seconds)
+DTMC_P_UP = 1.0               # Deterministic transitions (no randomness)
+DTMC_P_DOWN = 1.0             # Deterministic transitions (no randomness)
+PDR_CORRECTION_EXPONENT = 1.0 # Power-law exponent for PDR-packet-size correction 1.0 = pure independent BER model (pessimistic for bursty channels), 0.8 = slightly dampened (more realistic), 0.5 = heavy dampening (correlated errors dominate)
 
 # =============================================================================
 # PHY-Layer Configuration (3GPP/IEEE Standards)
@@ -176,11 +177,7 @@ FEATURE_COLS = {
     'dsrc': ['tx_latitude', 'tx_longitude', 'rsrp_1', 'rsrp_2', 'latency_ms', 'pdr'],
 }
 
-FEATURES_COUNT = {
-    '5g': 6,
-    'pc5': 4,
-    'dsrc': 6,
-}
+FEATURES_COUNT = {k: len(v) for k, v in FEATURE_COLS.items()}
 
 TARGET_COLS = ['latency_ms', 'pdr']
 
