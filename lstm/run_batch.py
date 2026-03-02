@@ -206,8 +206,15 @@ def main() -> None:
 
     # Build the full run matrix
     n_train = 0 if skip_training else len(args.models)
+    needs_infer_selection = (
+        args.infer_data
+        and args.infer_data != args.train_data
+        and not args.merged_csv
+        and not (Path(args.infer_data) / "super_merged.csv").is_file()
+    )
+    n_select = len(args.models) if needs_infer_selection else 0
     n_feedback = len(args.models) * len(args.vehicles)
-    total_runs = n_train + n_feedback
+    total_runs = n_train + n_select + n_feedback
     results: list[tuple[str, bool, float]] = []
 
     print("=" * 68)
@@ -223,6 +230,8 @@ def main() -> None:
     print(f"  Total pipeline invocations: {total_runs}")
     if n_train:
         print(f"    - {n_train} training runs")
+    if n_select:
+        print(f"    - {n_select} selection runs (infer data)")
     print(f"    - {n_feedback} feedback runs")
     print("=" * 68)
 
@@ -249,6 +258,27 @@ def main() -> None:
                 skip_args.append("--skip_trimming")
             if "--skip_matching" not in skip_args:
                 skip_args.append("--skip_matching")
+
+    # ── Phase 1.5: Run selection on infer_data (if different from train) ──
+    # Models were trained in Phase 1 on train_data.  Now run selection on
+    # infer_data so that super_merged.csv is generated there for the
+    # feedback loops to consume.
+    if needs_infer_selection:
+        for model in args.models:
+            label = f"SELECT {model.upper()} (infer)"
+            t0 = time.time()
+            argv = [
+                "--data", args.infer_data,
+                "--model", model,
+                "--load", "existing",
+                "--skip_trimming",
+                "--skip_matching",
+                "--skip_training",
+                "--skip_feedback",
+            ]
+            ok = run_pipeline(argv, label, step, total_runs, batch_start)
+            results.append((label, ok, time.time() - t0))
+            step += 1
 
     # ── Phase 2: Feedback loops for each model × vehicle count ────────────
     # Each run loads the latest non-retrained model (get_latest_model
