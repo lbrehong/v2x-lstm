@@ -29,7 +29,7 @@ from utils import find_files_with_string
 
 # Drift compensation parameters (calibrated for Dataset 05, used as fallback)
 # XMIN, XMAX: latency range for scaling; TH: threshold for drift calculation
-XMIN, XMAX, TH = 1.862, 1.921, -1.6
+XMIN, XMAX, TH = 1.862, 1.921, -1.685
 
 
 def calculate_coefficient(latencies, tx_seq_nums):
@@ -95,39 +95,81 @@ def auto_detect_calibration(file_path):
     """
     Auto-detect drift calibration constants from a raw 5G log file.
 
-    Uses all negative latencies (threshold=0) for drift regression, then
-    computes P5/P95 of compensated values as the scaling range.
+    Pipeline:
+        1. Read all raw latencies
+        2. Compute IQR-based outlier bounds to identify the normal band
+        3. Discard outliers (clock jumps, NTP corrections)
+        4. Compute drift coefficient from inliers only
+        5. Return outlier threshold and P5/P95 scaling range
 
     Args:
         file_path: Path to raw 5G log file
 
     Returns:
-        Tuple of (th, xmin, xmax) where th=0.0 and xmin/xmax are the
-        5th/95th percentiles of drift-compensated latencies.
+        Tuple of (th, xmin, xmax) where th is the upper outlier bound
+        (raw latencies > th are excluded) and xmin/xmax are the
+        5th/95th percentiles of drift-compensated inlier latencies.
     """
-    latencies = []
-    tx_seq_nums = []
+    all_latencies = []
+    all_seq_nums = []
     with open(file_path, 'r') as f:
+        header = f.readline().strip().split(',')
+        col_idx = {name.strip(): i for i, name in enumerate(header)}
+        ci_lat = col_idx["latency_ms"]
+        ci_seq = col_idx["tx_seq_num"]
         for line in f:
             if not line[0].isdigit():
                 continue
             parts = line.strip().split(',')
-            latency = float(parts[4].strip())
-            if latency < 0:
-                latencies.append(latency)
-                tx_seq_nums.append(int(parts[0].strip()))
+            try:
+                latency = float(parts[ci_lat].strip())
+            except (ValueError, IndexError):
+                continue
+            if np.isnan(latency):
+                continue
+            all_latencies.append(latency)
+            all_seq_nums.append(int(parts[ci_seq].strip()))
+
+    if not all_latencies:
+        raise ValueError(f"No valid latencies found in {file_path}")
+
+    arr = np.array(all_latencies)
+    seqs = np.array(all_seq_nums)
+
+    # Use negative latencies for drift regression (raw convention: always negative)
+    neg_mask = arr < 0
+    if neg_mask.sum() == 0:
+        raise ValueError(f"No negative latencies found in {file_path}")
+
+    # Within the negative set, apply IQR to exclude extreme clock-jump outliers
+    neg_arr = arr[neg_mask]
+    q1, q3 = np.percentile(neg_arr, [25, 75])
+    iqr = q3 - q1
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+    inlier_mask = neg_mask & (arr >= lower_bound) & (arr <= upper_bound)
+    n_outliers = neg_mask.sum() - inlier_mask.sum()
+    n_pos_outliers = (~neg_mask).sum()
+
+    latencies = arr[inlier_mask].tolist()
+    tx_seq_nums = seqs[inlier_mask].tolist()
 
     if not latencies:
-        raise ValueError(f"No negative latencies found in {file_path}")
+        raise ValueError(f"No inlier latencies found in {file_path}")
+
+    print(f"  Outlier filter: kept {len(latencies)}/{len(arr)} for drift calc "
+          f"(removed {n_outliers} IQR outliers + {n_pos_outliers} positive, "
+          f"IQR bounds [{lower_bound:.4f}, {upper_bound:.4f}])")
 
     coefficient = calculate_coefficient(latencies, tx_seq_nums)
     compensated = [compensate_drift(lat, seq, coefficient)
                    for lat, seq in zip(latencies, tx_seq_nums)]
 
-    xmin = float(np.percentile(compensated, 5))
-    xmax = float(np.percentile(compensated, 95))
-    print(f"Auto-detected calibration: th=0.0, xmin={xmin:.4f}, xmax={xmax:.4f}")
-    return 0.0, xmin, xmax
+    xmin = float(np.percentile(compensated, 1))
+    xmax = float(np.percentile(compensated, 99))
+
+    print(f"  Auto-detected calibration: th={upper_bound:.4f}, xmin={xmin:.4f}, xmax={xmax:.4f}, coeff={coefficient:.10f}")
+    return upper_bound, xmin, xmax, coefficient
 
 
 def trim_sa(file_list, output_file, path, th=None, xmin=None, xmax=None):
@@ -155,55 +197,74 @@ def trim_sa(file_list, output_file, path, th=None, xmin=None, xmax=None):
 
     # Auto-detect calibration if not provided
     if th is None or xmin is None or xmax is None:
-        th, xmin, xmax = auto_detect_calibration(input_file)
+        th, xmin, xmax, coefficient = auto_detect_calibration(input_file)
+    else:
+        # Manual calibration: still need coefficient from auto_detect
+        _, _, _, coefficient = auto_detect_calibration(input_file)
 
     out = 0
+    skipped_outliers = 0
     sa_data = {}
-    latencies = []
-    tx_seq_nums = []
     saved_sinr = 0
     saved_rsrp = 0
-    threshold = th
 
+    # Parse header to get column indices (column order varies across datasets)
     with open(input_file, 'r') as infile:
-        for line in infile:
-            if not line[0].isdigit():
-                continue
-            parts = line.strip().split(',')
-            tx_seq_num = str(int(parts[0].strip()))
-            latency = float(parts[4].strip())
-            if latency <= threshold:
-                latencies.append(latency)
-                tx_seq_nums.append(int(tx_seq_num))
+        header = infile.readline().strip().split(',')
+    col_idx = {name.strip(): i for i, name in enumerate(header)}
+    ci_lat = col_idx["latency_ms"]
+    ci_seq = col_idx["tx_seq_num"]
+    ci_ts = col_idx["tx_timestamp_ms"]
+    ci_lon = col_idx["tx_longitude"]
+    ci_lat_gps = col_idx["tx_latitude"]
+    ci_sinr = col_idx["sinr"]
+    ci_rsrp = col_idx["rsrp"]
 
-    if latencies and tx_seq_nums:
-        coefficient = calculate_coefficient(latencies, tx_seq_nums)
-        if not coefficient:
-            raise ValueError("Invalid coefficient value. Output file will be broken.")
-    else:
-        raise ValueError("Invalid coefficient value. Output file will be broken.")
-
+    # Single pass: apply drift compensation and write output
     with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
         outfile.write("tx_seq_num,tx_timestamp_ms,tx_latitude,tx_longitude,latency_ms,sinr,rsrp\n")
+        next(infile)  # skip header
 
         for line in infile:
             if not line[0].isdigit():
                 continue
 
             parts = line.strip().split(',')
-            tx_seq_num = str(int(parts[0].strip()))
-            timestamp = str(float(parts[1].strip()) * 1000.0)
-            latitude = parts[2].strip()
-            longitude = parts[3].strip()
-            latency_raw = parts[4].strip()
-            latency = scale_values(compensate_drift(float(latency_raw), int(tx_seq_num), coefficient), xmin=xmin, xmax=xmax)
+            try:
+                latency_raw = float(parts[ci_lat].strip())
+            except (ValueError, IndexError):
+                skipped_outliers += 1
+                continue
+            if np.isnan(latency_raw):
+                skipped_outliers += 1
+                continue
 
-            if parts[5].strip().startswith("N"):
+            tx_seq_num = int(parts[ci_seq].strip())
+            timestamp = str(float(parts[ci_ts].strip()) * 1000.0)
+            latitude = parts[ci_lat_gps].strip()
+            longitude = parts[ci_lon].strip()
+
+            compensated = compensate_drift(latency_raw, tx_seq_num, coefficient)
+
+            # Skip rows where compensated value is far outside calibration range
+            # (clock jumps, NTP corrections, extreme drift residuals)
+            margin = (xmax - xmin) * 2.0
+            if compensated < xmin - margin or compensated > xmax + margin:
+                skipped_outliers += 1
+                continue
+
+            latency = scale_values(compensated, xmin=xmin, xmax=xmax)
+
+            sinr_raw = parts[ci_sinr].strip()
+            if sinr_raw.startswith("N"):
                 sinr = saved_sinr
                 rsrp = saved_rsrp
             else:
-                sinr = str(abs(int(parts[5].strip())) / 10.0)  # Convert modem units to dB
-                rsrp = parts[6].strip()
+                try:
+                    sinr = str(abs(int(sinr_raw)) / 10.0)   # Modem x10 int units → dB
+                except ValueError:
+                    sinr = str(abs(float(sinr_raw)))         # Already dB (float)
+                rsrp = parts[ci_rsrp].strip()
                 saved_sinr = sinr
                 saved_rsrp = rsrp
 
@@ -211,6 +272,9 @@ def trim_sa(file_list, output_file, path, th=None, xmin=None, xmax=None):
 
             outfile.write(f"{tx_seq_num},{timestamp},{latitude},{longitude},{latency},{sinr},{rsrp}\n")
             out += 1
+
+    if skipped_outliers:
+        print(f"  Skipped {skipped_outliers} outlier rows")
 
     return sa_data
 
