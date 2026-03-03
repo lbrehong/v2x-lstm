@@ -135,8 +135,25 @@ def merge_csvs(directory):
     return df_super
 
 
-def add_predictions(df, directory, model_types=None):
-    """Add model predictions to the dataframe."""
+def add_predictions(df, directory, model_types=None, output_dir=None):
+    """Add model predictions to the dataframe.
+
+    Args:
+        df: Super-merged DataFrame with tx_latitude/tx_longitude columns.
+        directory: Data directory (checked first for final_log files).
+        model_types: List of model types to include.
+        output_dir: Pipeline output directory (fallback for final_log files).
+                    Uses config.OUTPUT_DIR if None — note that the module-level
+                    OUTPUT_DIR import is stale when run_pipeline.py overrides it.
+    """
+    import config as _cfg
+    fallback_dir = output_dir or _cfg.OUTPUT_DIR
+
+    # Round GPS in the super dataframe for robust matching
+    GPS_DECIMALS = 6
+    df["_lat_r"] = df["tx_latitude"].round(GPS_DECIMALS)
+    df["_lon_r"] = df["tx_longitude"].round(GPS_DECIMALS)
+
     for model_type in (model_types or MODELS):
         for rat in RATS:
             filename = os.path.join(directory, f"final_log_{model_type}_{rat}.csv")
@@ -144,7 +161,7 @@ def add_predictions(df, directory, model_types=None):
             try:
                 df_pred = pd.read_csv(filename, usecols=["latitude", "longitude", "pred_latency", "pred_pdr"])
             except FileNotFoundError:
-                df_pred = pd.read_csv(os.path.join(OUTPUT_DIR, f"final_log_{model_type}_{rat}.csv"),
+                df_pred = pd.read_csv(os.path.join(fallback_dir, f"final_log_{model_type}_{rat}.csv"),
                                        usecols=["latitude", "longitude", "pred_latency", "pred_pdr"])
             df_pred.rename(columns={
                 "latitude": "tx_latitude",
@@ -153,7 +170,16 @@ def add_predictions(df, directory, model_types=None):
                 "pred_pdr": f"pred_pdr_{rat}_{model_type}"
             }, inplace=True)
 
-            df = df.merge(df_pred, on=["tx_latitude", "tx_longitude"], how="left")
+            # Round GPS for matching, then drop duplicates to avoid row explosion
+            df_pred["_lat_r"] = df_pred["tx_latitude"].round(GPS_DECIMALS)
+            df_pred["_lon_r"] = df_pred["tx_longitude"].round(GPS_DECIMALS)
+            pred_cols = [f"pred_latency_ms_{rat}_{model_type}", f"pred_pdr_{rat}_{model_type}"]
+            df_pred = df_pred.drop_duplicates(subset=["_lat_r", "_lon_r"], keep="first")
+
+            df = df.merge(df_pred[["_lat_r", "_lon_r"] + pred_cols],
+                          on=["_lat_r", "_lon_r"], how="left")
+
+    df.drop(columns=["_lat_r", "_lon_r"], inplace=True)
     return df
 
 
