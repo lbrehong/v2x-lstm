@@ -355,12 +355,11 @@ def stage_selection(args) -> None:
 
     banner("Stage 4: RAT selection on matched data")
 
-    from selection.rat_selection import (merge_csvs, add_predictions,
+    from selection.rat_selection import (merge_csvs, get_predictions,
                                          select_best_rat, opportunistic_best_rat)
-    from learning.data_preprocessing import preprocess_lstm_input
-    from learning.model import automatic_train, rmse
+    from learning.model import rmse
     from keras.models import load_model
-    from config import TIMESTEPS, TARGET_COLS, RATS, MODELS
+    from config import RATS, MODELS
     from utils import get_latest_model
 
     INPUT = args.data
@@ -369,34 +368,29 @@ def stage_selection(args) -> None:
 
     print(f"_ Processing all input CSVs with model type(s): {model_types}")
 
-    # Generate predictions for each RAT x model_type
-    for rat in RATS:
-        matched_csv = os.path.join(INPUT, f"matched_{rat}.csv")
-        if not os.path.exists(matched_csv):
-            print(f"  Warning: {matched_csv} not found, skipping {rat}")
-            continue
-        dfl = pd.read_csv(matched_csv)
-        (X_new, y_new, scalers) = preprocess_lstm_input(
-            dfl, new=True, rat=rat, target_cols=TARGET_COLS, seq_length=TIMESTEPS)
-        for mt in model_types:
+    # Build super_merged from matched CSVs
+    print("_ Merging into the super-CSV.")
+    super_df = merge_csvs(INPUT)
+
+    # Predict directly on super_merged GPS — no intermediate files
+    gps_data = super_df[["tx_latitude", "tx_longitude"]].copy()
+
+    for mt in model_types:
+        for rat in RATS:
             model_path = get_latest_model(mt, rat)
             if model_path is None:
                 print(f"  Warning: no {mt} model found for {rat}, skipping")
                 continue
             model_f = load_model(model_path, custom_objects={'rmse': rmse})
-            automatic_train(model_f, X_new, y_new, 32, 200, 0.15,
-                            os.path.join(config.OUTPUT_DIR, f"final_log_{mt}_{rat}.csv"), rat, mt)
+            latency, pdr = get_predictions(model_f, rat, gps_data)
+            super_df[f"pred_latency_ms_{rat}_{mt}"] = latency
+            super_df[f"pred_pdr_{rat}_{mt}"] = pdr
             print(f"  {rat}: {mt} predictions done.")
 
-    print("_ Processing done.")
-    print("_ Merging into the super-CSV.")
-    super_df = merge_csvs(INPUT)
-    print("_ Adding predictions into the super-CSV.")
-    super_pred_df = add_predictions(super_df, INPUT, model_types=model_types)
-    print("_ Merging done.")
+    print("_ Predictions added.")
     print("_ Sending to the selection algorithm.")
     for mt in model_types:
-        super_df[f"Best_RAT_{mt}"] = super_pred_df.apply(select_best_rat, args=(mt,), axis=1)
+        super_df[f"Best_RAT_{mt}"] = super_df.apply(select_best_rat, args=(mt,), axis=1)
     print("_ Adding opportunistic algorithm.")
     super_df = opportunistic_best_rat(super_df)
     print("_ Algorithms done.")
