@@ -190,9 +190,9 @@ class TestSimulateTx:
         random.seed(42)
         delivered, latency, corrected_pdr = _simulate_tx(
             rat=RATType.PC5,
-            packet_size=1000,
+            packet_size=1024,
             predicted_pdr=0.95,
-            base_packet_size=1000,
+            base_packet_size=1024,
             correction_exponent=1.0,
         )
         assert isinstance(delivered, bool)

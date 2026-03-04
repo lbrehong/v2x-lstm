@@ -82,7 +82,7 @@ Feedback loop options:
   --num_vehicles N      Number of vehicles (default: 1 = single-vehicle)
   --retrain_interval N  Samples before retraining (default: 500)
   --seed N              Random seed for reproducibility
-  --base_packet_size N  Base packet size in bytes (default: 1000)
+  --base_packet_size N  Base packet size in bytes (default: 1024)
   --correction_exp F    PDR correction exponent (default: 0.8)
 
 Skip stages:

@@ -328,9 +328,10 @@ def run_feedback_loop(
     model_type: str = "lstm",
     seed: Optional[int] = None,
     retrain_interval: int = 500,
-    base_packet_size: int = 1000,
+    base_packet_size: int = 1024,
     correction_exponent: float = PDR_CORRECTION_EXPONENT,
     sim_tx_interval_ms: Optional[int] = None,
+    enable_dtmc: bool = True,
 ):
     if seed is not None:
         random.seed(seed)
@@ -348,6 +349,7 @@ def run_feedback_loop(
     qsim = QueueSimulator(
         base_packet_size=base_packet_size,
         correction_exponent=correction_exponent,
+        enable_dtmc=enable_dtmc,
     )
     latency_scalers = {
         rat: create_latency_scaler(rat) for rat in ("5g", "pc5", "dsrc")
@@ -638,11 +640,12 @@ def run_multi_vehicle_loop(
     model_type: str = "lstm",
     seed: Optional[int] = None,
     retrain_interval: int = 500,
-    base_packet_size: int = 1000,
+    base_packet_size: int = 1024,
     correction_exponent: float = PDR_CORRECTION_EXPONENT,
     num_vehicles: int = 20,
     sim_tx_interval_ms: Optional[int] = None,
     enable_contention: bool = True,
+    enable_dtmc: bool = True,
 ):
     """Run multi-vehicle platoon simulation with optional contention effects.
 
@@ -656,12 +659,21 @@ def run_multi_vehicle_loop(
     ensure_dir_exists(config.OUTPUT_DIR)
     ensure_dir_exists(MODEL_DIR)
 
-    tag = "" if enable_contention else "_baseline"
+    tag = ""
+    if not enable_contention:
+        tag += "_baseline"
+    if not enable_dtmc:
+        tag += "_no_dtmc"
 
     df = pd.read_csv(input_csv)
-    if not enable_contention:
+    if tag:
+        labels = []
+        if not enable_contention:
+            labels.append("no contention")
+        if not enable_dtmc:
+            labels.append("no DTMC")
         print("\n" + "=" * 64)
-        print("BASELINE (no contention) pass")
+        print(f"VARIANT pass ({', '.join(labels)})")
         print("=" * 64)
     print(f"Loaded {len(df)} rows from {input_csv}")
     print(f"Simulating {num_vehicles} vehicles\n")
@@ -679,6 +691,7 @@ def run_multi_vehicle_loop(
         QueueSimulator(
             base_packet_size=base_packet_size,
             correction_exponent=correction_exponent,
+            enable_dtmc=enable_dtmc,
         )
         for _ in range(num_vehicles)
     ]
@@ -1093,7 +1106,10 @@ def run_multi_vehicle_loop(
 
     # Print summary
     print("\n" + "=" * 64)
-    mode_label = "CONTENTION" if enable_contention else "BASELINE (no contention)"
+    mode_parts = []
+    mode_parts.append("CONTENTION" if enable_contention else "NO CONTENTION")
+    mode_parts.append("DTMC" if enable_dtmc else "NO DTMC")
+    mode_label = " + ".join(mode_parts)
     print(f"MULTI-VEHICLE FEEDBACK LOOP RESULTS — {mode_label} ({num_vehicles} vehicles)")
     print("=" * 64)
     print(f"  CSV rows:              {len(df)}")
@@ -1111,7 +1127,7 @@ def run_multi_vehicle_loop(
         print(f"  {k}: {v}")
     print("=" * 64)
 
-    # Automatically run baseline (no contention) pass for comparison
+    # Automatically run variant passes for comparison
     if enable_contention:
         run_multi_vehicle_loop(
             input_csv=input_csv,
@@ -1123,6 +1139,20 @@ def run_multi_vehicle_loop(
             num_vehicles=num_vehicles,
             sim_tx_interval_ms=sim_tx_interval_ms,
             enable_contention=False,
+            enable_dtmc=enable_dtmc,
+        )
+    if enable_dtmc:
+        run_multi_vehicle_loop(
+            input_csv=input_csv,
+            model_type=model_type,
+            seed=seed,
+            retrain_interval=retrain_interval,
+            base_packet_size=base_packet_size,
+            correction_exponent=correction_exponent,
+            num_vehicles=num_vehicles,
+            sim_tx_interval_ms=sim_tx_interval_ms,
+            enable_contention=enable_contention,
+            enable_dtmc=False,
         )
 
     return summary
@@ -1141,12 +1171,14 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--retrain_interval", type=int, default=500,
                         help="Samples per RAT before retraining (default: 500)")
-    parser.add_argument("--base_packet_size", type=int, default=1000)
+    parser.add_argument("--base_packet_size", type=int, default=1024)
     parser.add_argument("--correction_exponent", type=float, default=PDR_CORRECTION_EXPONENT)
     parser.add_argument("--num_vehicles", type=int, default=1,
                         help="Number of vehicles in platoon (default: 1 = single-vehicle mode)")
     parser.add_argument("--tx-interval", type=int, default=None,
                         help="Override TX interval in ms for all RATs (default: per-RAT from config)")
+    parser.add_argument("--no-dtmc", action="store_true",
+                        help="Disable DTMC adaptive packet sizing (use fixed base_packet_size)")
     args = parser.parse_args()
 
     if args.num_vehicles > 1:
@@ -1159,6 +1191,7 @@ def main():
             correction_exponent=args.correction_exponent,
             num_vehicles=args.num_vehicles,
             sim_tx_interval_ms=args.tx_interval,
+            enable_dtmc=not args.no_dtmc,
         )
     else:
         run_feedback_loop(
@@ -1169,6 +1202,7 @@ def main():
             base_packet_size=args.base_packet_size,
             correction_exponent=args.correction_exponent,
             sim_tx_interval_ms=args.tx_interval,
+            enable_dtmc=not args.no_dtmc,
         )
 
 

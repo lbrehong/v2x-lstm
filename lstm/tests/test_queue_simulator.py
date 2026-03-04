@@ -45,7 +45,7 @@ class TestQueueSimulator:
     def test_initialization(self):
         """QueueSimulator should initialize correctly."""
         sim = QueueSimulator()
-        assert sim.base_packet_size == 1000
+        assert sim.base_packet_size == 1024
         assert len(sim.dtmc_sizers) == 3
         assert sim.queue_depth == 0
 
@@ -94,6 +94,23 @@ class TestQueueSimulator:
 
         packet_decision = sim.decide_packet_size(decision, state)
         assert packet_decision.packet_size_bytes == sim.base_packet_size
+
+    def test_enable_dtmc_false_returns_base_size(self):
+        """When enable_dtmc=False, decide_packet_size always returns base_packet_size."""
+        sim = QueueSimulator(base_packet_size=1234, enable_dtmc=False)
+        for rat in [RATType.FiveG, RATType.PC5, RATType.DSRC]:
+            decision = RATDecision(
+                selected_rat=rat,
+                confidence=0.9,
+                predicted_latency_ms=15.0,
+                predicted_pdr=0.99,
+                all_predictions={},
+            )
+            pkt = sim.decide_packet_size(decision, current_time=1.0)
+            assert pkt.packet_size_bytes == 1234, (
+                f"Expected base_packet_size=1234 for {rat}, got {pkt.packet_size_bytes}"
+            )
+            assert pkt.fragment_count == 1
 
     def test_pdr_trend_calculation(self):
         """PDR trend should update based on outcomes."""
@@ -249,7 +266,7 @@ class TestIntegratedQueueSimulator:
         sim = IntegratedQueueSimulator(network_data=sample_data)
         from config import DEFAULT_TX_INTERVAL_MS
         assert sim.arrival_rate_hz == 1000 / DEFAULT_TX_INTERVAL_MS
-        assert sim.base_packet_size == 1000
+        assert sim.base_packet_size == 1024
 
     def test_run_returns_metrics(self, sample_data):
         """Run should return SimulationMetrics."""

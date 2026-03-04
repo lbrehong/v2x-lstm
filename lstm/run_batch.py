@@ -68,12 +68,14 @@ def parse_args() -> argparse.Namespace:
                       help="Training epochs (0 = use config default)")
     opts.add_argument("--retrain_interval", type=int, default=500,
                       help="Feedback retraining interval (default: 500)")
-    opts.add_argument("--base_packet_size", type=int, default=1000,
-                      help="Base packet size in bytes (default: 1000)")
+    opts.add_argument("--base_packet_size", type=int, default=1024,
+                      help="Base packet size in bytes (default: 1024)")
     opts.add_argument("--correction_exp", type=float, default=0.8,
                       help="PDR correction exponent (default: 0.8)")
     opts.add_argument("--tx_interval", type=int, default=None,
                       help="Override TX interval in ms for all RATs (default: per-RAT from config)")
+    opts.add_argument("--no-dtmc", action="store_true",
+                      help="Disable DTMC adaptive packet sizing (use fixed base_packet_size)")
 
     skip = p.add_argument_group("Skip stages (applied to training run)")
     skip.add_argument("--skip_trimming", action="store_true")
@@ -195,6 +197,8 @@ def main() -> None:
     ]
     if args.tx_interval is not None:
         fb_args += ["--tx-interval", str(args.tx_interval)]
+    if args.no_dtmc:
+        fb_args.append("--no-dtmc")
 
     skip_args = []
     if args.skip_trimming:

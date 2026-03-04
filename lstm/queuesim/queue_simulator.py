@@ -80,11 +80,12 @@ class QueueSimulator:
 
     def __init__(
         self,
-        base_packet_size: int = 1000,
+        base_packet_size: int = 1024,
         correction_exponent: float = PDR_CORRECTION_EXPONENT,
         target_latency_ms: float = 20.0,
         target_pdr: float = 0.99,
         enforce_phy_limits: bool = True,
+        enable_dtmc: bool = True,
     ):
         """
         Initialize queue simulator.
@@ -95,12 +96,14 @@ class QueueSimulator:
             target_latency_ms: Application latency requirement
             target_pdr: Application PDR requirement
             enforce_phy_limits: Whether to enforce PHY-layer constraints
+            enable_dtmc: Whether to use DTMC adaptive packet sizing (False = fixed base_packet_size)
         """
         self.base_packet_size = base_packet_size
         self.correction_exponent = correction_exponent
         self.target_latency_ms = target_latency_ms
         self.target_pdr = target_pdr
         self.enforce_phy_limits = enforce_phy_limits
+        self.enable_dtmc = enable_dtmc
 
         # DTMC sizers per RAT
         self.dtmc_sizers: Dict[RATType, DTMCPacketSizer] = {}
@@ -278,6 +281,14 @@ class QueueSimulator:
 
         send_rate = 1000 / get_tx_interval_ms(rat)
 
+        if not self.enable_dtmc:
+            return PacketSizeDecision(
+                packet_size_bytes=self.base_packet_size,
+                fragment_count=1,
+                priority_level=0,
+                send_rate_hz=send_rate,
+            )
+
         if rat == RATType.UNAVAILABLE:
             return PacketSizeDecision(
                 packet_size_bytes=self.base_packet_size,
@@ -381,7 +392,7 @@ class IntegratedQueueSimulator:
         rat_api=None,
         network_data: Optional[pd.DataFrame] = None,
         arrival_rate_hz: float = 1000 / DEFAULT_TX_INTERVAL_MS,
-        base_packet_size: int = 1000,
+        base_packet_size: int = 1024,
         correction_exponent: float = PDR_CORRECTION_EXPONENT,
         seed: Optional[int] = None,
         enforce_phy_limits: bool = True,
@@ -837,7 +848,7 @@ def run_standalone(
     input_csv: str,
     output_csv: str,
     arrival_rate_hz: float = 1000 / DEFAULT_TX_INTERVAL_MS,
-    base_packet_size: int = 1000,
+    base_packet_size: int = 1024,
     correction_exponent: float = PDR_CORRECTION_EXPONENT,
     seed: Optional[int] = None,
     enforce_phy_limits: bool = True,
