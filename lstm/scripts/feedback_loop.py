@@ -1128,7 +1128,7 @@ def run_multi_vehicle_loop(
     print("=" * 64)
 
     # Automatically run variant passes for comparison
-    if enable_contention:
+    if enable_contention and enable_dtmc:
         run_multi_vehicle_loop(
             input_csv=input_csv,
             model_type=model_type,
