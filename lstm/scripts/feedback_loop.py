@@ -1154,7 +1154,7 @@ def run_multi_vehicle_loop(
             enable_contention=enable_contention,
             enable_dtmc=False,
         )
-    if not enable_dtmc:
+    if enable_contention and not enable_dtmc:
         run_multi_vehicle_loop(
             input_csv=input_csv,
             model_type=model_type,
