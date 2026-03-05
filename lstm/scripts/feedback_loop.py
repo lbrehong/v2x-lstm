@@ -1154,6 +1154,19 @@ def run_multi_vehicle_loop(
             enable_contention=enable_contention,
             enable_dtmc=False,
         )
+    if not enable_dtmc:
+        run_multi_vehicle_loop(
+            input_csv=input_csv,
+            model_type=model_type,
+            seed=seed,
+            retrain_interval=retrain_interval,
+            base_packet_size=base_packet_size,
+            correction_exponent=correction_exponent,
+            num_vehicles=num_vehicles,
+            sim_tx_interval_ms=sim_tx_interval_ms,
+            enable_contention=False,
+            enable_dtmc=False,
+        )
 
     return summary
 
