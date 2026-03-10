@@ -448,6 +448,17 @@ class TestRunFeedbackLoop:
             model_type="lstm",
         )
 
+        mock_api.select_rat_opportunistic.return_value = RATDecision(
+            selected_rat=RATType.PC5,
+            confidence=1.0,
+            predicted_latency_ms=10.0,
+            predicted_pdr=0.96,
+            all_predictions={RATType.PC5: (10.0, 0.96)},
+            model_type="opportunistic",
+        )
+
+        mock_api._previous_rat = RATType.FiveG
+
         # _history has enough entries for sequence building
         mock_api._history = {
             "dsrc": [np.zeros(6).tolist() for _ in range(TIMESTEPS)],
@@ -1072,6 +1083,17 @@ class TestRunMultiVehicleLoop:
             all_predictions={RATType.PC5: (10.0, 0.96)},
             model_type="lstm",
         )
+
+        mock_api.select_rat_opportunistic.return_value = RATDecision(
+            selected_rat=RATType.PC5,
+            confidence=1.0,
+            predicted_latency_ms=10.0,
+            predicted_pdr=0.96,
+            all_predictions={RATType.PC5: (10.0, 0.96)},
+            model_type="opportunistic",
+        )
+
+        mock_api._previous_rat = RATType.FiveG
 
         mock_api._history = {
             "dsrc": [np.zeros(6).tolist() for _ in range(TIMESTEPS)],

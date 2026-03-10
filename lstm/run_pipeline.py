@@ -104,6 +104,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="Override TX interval in ms for all RATs (default: per-RAT from config)")
     fb.add_argument("--no-dtmc", action="store_true",
                     help="Disable DTMC adaptive packet sizing (use fixed base_packet_size)")
+    fb.add_argument("--no-pqos", action="store_true",
+                    help="Disable pQoS model inference (opportunistic baseline)")
 
     skip = p.add_argument_group("Skip stages")
     skip.add_argument("--skip_trimming", action="store_true")
@@ -426,6 +428,7 @@ def stage_feedback(args, merged_csv: str) -> None:
             num_vehicles=args.num_vehicles,
             sim_tx_interval_ms=args.tx_interval,
             enable_dtmc=not args.no_dtmc,
+            enable_pqos=not args.no_pqos,
         )
     else:
         banner("Stage 5: Feedback loop (single vehicle)")
@@ -439,6 +442,7 @@ def stage_feedback(args, merged_csv: str) -> None:
             correction_exponent=args.correction_exp,
             sim_tx_interval_ms=args.tx_interval,
             enable_dtmc=not args.no_dtmc,
+            enable_pqos=not args.no_pqos,
         )
 
 

@@ -76,6 +76,8 @@ def parse_args() -> argparse.Namespace:
                       help="Override TX interval in ms for all RATs (default: per-RAT from config)")
     opts.add_argument("--no-dtmc", action="store_true",
                       help="Disable DTMC adaptive packet sizing (use fixed base_packet_size)")
+    opts.add_argument("--no-pqos", action="store_true",
+                      help="Disable pQoS model inference (opportunistic baseline)")
 
     skip = p.add_argument_group("Skip stages (applied to training run)")
     skip.add_argument("--skip_trimming", action="store_true")
@@ -199,6 +201,8 @@ def main() -> None:
         fb_args += ["--tx-interval", str(args.tx_interval)]
     if args.no_dtmc:
         fb_args.append("--no-dtmc")
+    if args.no_pqos:
+        fb_args.append("--no-pqos")
 
     skip_args = []
     if args.skip_trimming:

@@ -80,6 +80,9 @@ class RATSelectionAPI:
         self.outcome_buffer: List[TransmissionOutcome] = []
         self.retrain_interval = 500
 
+        # Opportunistic: previous RAT for sticky policy
+        self._previous_rat: RATType = RATType.FiveG
+
         # Sequence history for predictions
         self._history: Dict[str, List[np.ndarray]] = {
             "dsrc": [],
@@ -442,6 +445,95 @@ class RATSelectionAPI:
             all_predictions=all_predictions,
             recommended_max_packet_size=recommended_size,
             model_type=self.model_type,
+        )
+
+    def select_rat_opportunistic(
+        self,
+        state: NetworkState,
+    ) -> RATDecision:
+        """
+        Select RAT using reactive/opportunistic logic — no model inference.
+
+        Uses actual observed metrics from NetworkState with a sticky policy
+        to reduce handovers. Mirrors the opportunistic_best_rat algorithm
+        from rat_selection.py.
+
+        Algorithm:
+            1. Filter RATs with actual PDR > 5%
+            2. If on 5G and V2X available, switch to lowest latency
+            3. Sticky: stay on current RAT if still viable
+            4. Fall back to 5G
+
+        Args:
+            state: Current network state with measurements
+
+        Returns:
+            RATDecision with actual (not predicted) values
+        """
+        # Build options from actual observed metrics: (rat_str, rat_enum, latency, pdr)
+        options = []
+        for rat_str, rat_enum, lat_val, pdr_val in [
+            ("dsrc", RATType.DSRC, state.dsrc_latency_ms, state.dsrc_pdr),
+            ("pc5", RATType.PC5, state.pc5_latency_ms, state.pc5_pdr),
+            ("5g", RATType.FiveG, state.fiveg_latency_ms, state.fiveg_pdr),
+        ]:
+            latency = lat_val if lat_val is not None else 0.0
+            pdr = pdr_val if pdr_val is not None else 0.0
+            options.append((rat_str, rat_enum, latency, pdr))
+
+        # Build all_predictions dict with actual values (not model predictions)
+        all_predictions: Dict[RATType, Tuple[float, float]] = {
+            opt[1]: (opt[2], opt[3]) for opt in options
+        }
+
+        # Filter by PDR > 50%
+        valid_options = [opt for opt in options if opt[3] > 0.5]
+
+        if not valid_options:
+            # Try any with PDR > 0
+            keep = [opt for opt in options if opt[3] > 0.0]
+            if keep:
+                best = min(keep, key=lambda x: x[2])
+                selected_rat = best[1]
+            else:
+                fiveg = next((opt for opt in options if opt[0] == "5g"), None)
+                if fiveg and (fiveg[3] or 0.0) > self.pdr_availability:
+                    selected_rat = RATType.FiveG
+                else:
+                    selected_rat = RATType.UNAVAILABLE
+        elif len(valid_options) == 1 and valid_options[0][0] == "5g":
+            selected_rat = RATType.FiveG
+        elif self._previous_rat == RATType.FiveG and any(
+            opt[0] in ("dsrc", "pc5") for opt in valid_options
+        ):
+            # On 5G and V2X available → switch to lowest latency
+            best = min(valid_options, key=lambda x: x[2])
+            selected_rat = best[1]
+        elif any(opt[1] == self._previous_rat for opt in valid_options):
+            # Sticky: stay on current RAT
+            selected_rat = self._previous_rat
+        else:
+            fiveg = next((opt for opt in options if opt[0] == "5g"), None)
+            if fiveg and (fiveg[3] or 0.0) > self.pdr_availability:
+                selected_rat = RATType.FiveG
+            else:
+                selected_rat = RATType.UNAVAILABLE
+
+        self._previous_rat = selected_rat
+
+        # Get actual values for selected RAT
+        if selected_rat in all_predictions:
+            sel_lat, sel_pdr = all_predictions[selected_rat]
+        else:
+            sel_lat, sel_pdr = float("inf"), 0.0
+
+        return RATDecision(
+            selected_rat=selected_rat,
+            confidence=1.0,
+            predicted_latency_ms=sel_lat,
+            predicted_pdr=sel_pdr,
+            all_predictions=all_predictions,
+            model_type="opportunistic",
         )
 
     def report_outcome(self, outcome: TransmissionOutcome) -> None:

@@ -332,7 +332,11 @@ def run_feedback_loop(
     correction_exponent: float = PDR_CORRECTION_EXPONENT,
     sim_tx_interval_ms: Optional[int] = None,
     enable_dtmc: bool = True,
+    enable_pqos: bool = True,
 ):
+    if not enable_pqos:
+        enable_dtmc = False
+
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
@@ -406,8 +410,11 @@ def run_feedback_loop(
             state = row_to_network_state(row, timestamp_ms=int(sim_time * 1000))
 
             # 2. RAT selection (also builds internal history/sequence)
-            queue_ctx = qsim.get_queue_context()
-            decision = api.select_rat(state, queue_ctx)
+            if enable_pqos:
+                queue_ctx = qsim.get_queue_context()
+                decision = api.select_rat(state, queue_ctx)
+            else:
+                decision = api.select_rat_opportunistic(state)
             selected_rat = decision.selected_rat
 
             if selected_rat == RATType.UNAVAILABLE:
@@ -448,41 +455,42 @@ def run_feedback_loop(
                 successful_bytes += packet_size
 
             # 6. Capture sequence + ground-truth target for retraining
-            history = api._history[rat_str]
-            if len(history) >= TIMESTEPS:
-                seq = np.array(history[-TIMESTEPS:])  # (TIMESTEPS, n_features)
+            if enable_pqos:
+                history = api._history[rat_str]
+                if len(history) >= TIMESTEPS:
+                    seq = np.array(history[-TIMESTEPS:])  # (TIMESTEPS, n_features)
 
-                # Ground-truth targets from the CSV row
-                actual_lat = _actual_latency(state, selected_rat)
-                actual_pdr_val = _actual_pdr(state, selected_rat)
+                    # Ground-truth targets from the CSV row
+                    actual_lat = _actual_latency(state, selected_rat)
+                    actual_pdr_val = _actual_pdr(state, selected_rat)
 
-                if actual_lat is not None and actual_pdr_val is not None:
-                    # Normalise latency target the same way training data was prepared
-                    lat_norm = latency_scalers[rat_str].transform([[actual_lat]])[0][0]
+                    if actual_lat is not None and actual_pdr_val is not None:
+                        # Normalise latency target the same way training data was prepared
+                        lat_norm = latency_scalers[rat_str].transform([[actual_lat]])[0][0]
 
-                    # Use ground-truth link-level PDR from the CSV as the
-                    # retraining target.  The simulator applies packet-size
-                    # correction and contention on top of the model's
-                    # prediction, so training on DTMC window_pdr would
-                    # double-count those effects and poison the model.
-                    buffers[rat_str].append((seq, lat_norm, actual_pdr_val))
+                        # Use ground-truth link-level PDR from the CSV as the
+                        # retraining target.  The simulator applies packet-size
+                        # correction and contention on top of the model's
+                        # prediction, so training on DTMC window_pdr would
+                        # double-count those effects and poison the model.
+                        buffers[rat_str].append((seq, lat_norm, actual_pdr_val))
 
-            # 7. Check if retraining is due for this RAT
-            if len(buffers[rat_str]) >= retrain_interval and rat_str in api.models:
-                retrain_count[rat_str] += 1
-                buf = buffers[rat_str]
+                # 7. Check if retraining is due for this RAT
+                if len(buffers[rat_str]) >= retrain_interval and rat_str in api.models:
+                    retrain_count[rat_str] += 1
+                    buf = buffers[rat_str]
 
-                x_batch = np.array([b[0] for b in buf])
-                y_lat = np.array([b[1] for b in buf])
-                y_pdr = np.array([b[2] for b in buf])
+                    x_batch = np.array([b[0] for b in buf])
+                    y_lat = np.array([b[1] for b in buf])
+                    y_pdr = np.array([b[2] for b in buf])
 
-                _retrain_model(
-                    api, rat_str, x_batch, y_lat, y_pdr,
-                    cycle=retrain_count[rat_str],
-                    retrain_log=retrain_log,
-                    latency_scaler=latency_scalers[rat_str],
-                )
-                buffers[rat_str] = []
+                    _retrain_model(
+                        api, rat_str, x_batch, y_lat, y_pdr,
+                        cycle=retrain_count[rat_str],
+                        retrain_log=retrain_log,
+                        latency_scaler=latency_scalers[rat_str],
+                    )
+                    buffers[rat_str] = []
 
             # 8. Retrieve DTMC state for logging
             dtmc = qsim.dtmc_sizers.get(selected_rat)
@@ -646,12 +654,17 @@ def run_multi_vehicle_loop(
     sim_tx_interval_ms: Optional[int] = None,
     enable_contention: bool = True,
     enable_dtmc: bool = True,
+    enable_pqos: bool = True,
 ):
     """Run multi-vehicle platoon simulation with optional contention effects.
 
     Each vehicle has its own feature history, DTMC sizer, and queue simulator.
     Models and retraining buffers are shared globally.
     """
+    if not enable_pqos:
+        enable_contention = False
+        enable_dtmc = False
+
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
@@ -660,6 +673,8 @@ def run_multi_vehicle_loop(
     ensure_dir_exists(MODEL_DIR)
 
     tag = ""
+    if not enable_pqos:
+        tag += "_nopqos"
     if not enable_contention:
         tag += "_baseline"
     if not enable_dtmc:
@@ -668,6 +683,8 @@ def run_multi_vehicle_loop(
     df = pd.read_csv(input_csv)
     if tag:
         labels = []
+        if not enable_pqos:
+            labels.append("no pQoS (opportunistic)")
         if not enable_contention:
             labels.append("no contention")
         if not enable_dtmc:
@@ -774,17 +791,20 @@ def run_multi_vehicle_loop(
             for v in range(num_vehicles):
                 state_v = _perturb_state(base_state, vehicle_rngs[v])
 
-                # Swap in this vehicle's history (copy lists so api doesn't
-                # hold a reference into vehicle_histories)
-                api._history = {
-                    k: list(v_list) for k, v_list in vehicle_histories[v].items()
-                }
+                if enable_pqos:
+                    # Swap in this vehicle's history (copy lists so api doesn't
+                    # hold a reference into vehicle_histories)
+                    api._history = {
+                        k: list(v_list) for k, v_list in vehicle_histories[v].items()
+                    }
 
-                queue_ctx = vehicle_qsims[v].get_queue_context()
-                decision = api.select_rat(state_v, queue_ctx)
+                    queue_ctx = vehicle_qsims[v].get_queue_context()
+                    decision = api.select_rat(state_v, queue_ctx)
 
-                # Save updated history back (new dict, decoupled from api)
-                vehicle_histories[v] = api._history
+                    # Save updated history back (new dict, decoupled from api)
+                    vehicle_histories[v] = api._history
+                else:
+                    decision = api.select_rat_opportunistic(state_v)
 
                 if decision.selected_rat == RATType.UNAVAILABLE:
                     continue
@@ -921,16 +941,17 @@ def run_multi_vehicle_loop(
                     vehicle_bytes[v] += packet_size
 
                 # Build retraining sequence from this vehicle's history
-                history = vehicle_histories[v].get(rat_str, [])
-                if len(history) >= TIMESTEPS:
-                    seq = np.array(history[-TIMESTEPS:])
-                    actual_lat = _actual_latency(state_v, selected_rat)
-                    actual_pdr_val = _actual_pdr(state_v, selected_rat)
+                if enable_pqos:
+                    history = vehicle_histories[v].get(rat_str, [])
+                    if len(history) >= TIMESTEPS:
+                        seq = np.array(history[-TIMESTEPS:])
+                        actual_lat = _actual_latency(state_v, selected_rat)
+                        actual_pdr_val = _actual_pdr(state_v, selected_rat)
 
-                    if actual_lat is not None and actual_pdr_val is not None:
-                        lat_norm = latency_scalers[rat_str].transform([[actual_lat]])[0][0]
-                        # Use ground-truth link-level PDR (see single-vehicle comment)
-                        buffers[rat_str].append((seq, lat_norm, actual_pdr_val))
+                        if actual_lat is not None and actual_pdr_val is not None:
+                            lat_norm = latency_scalers[rat_str].transform([[actual_lat]])[0][0]
+                            # Use ground-truth link-level PDR (see single-vehicle comment)
+                            buffers[rat_str].append((seq, lat_norm, actual_pdr_val))
 
                 # DTMC state for logging
                 dtmc = vehicle_qsims[v].dtmc_sizers.get(selected_rat)
@@ -961,6 +982,9 @@ def run_multi_vehicle_loop(
                 })
 
             # Phase 4: Check retraining threshold (global, per RAT)
+            if not enable_pqos:
+                sim_time += sim_dt
+                continue
             for rat_str_r in ("dsrc", "pc5", "5g"):
                 if len(buffers[rat_str_r]) >= retrain_interval and rat_str_r in api.models:
                     retrain_count[rat_str_r] += 1
@@ -1107,6 +1131,8 @@ def run_multi_vehicle_loop(
     # Print summary
     print("\n" + "=" * 64)
     mode_parts = []
+    if not enable_pqos:
+        mode_parts.append("NO pQoS (OPPORTUNISTIC)")
     mode_parts.append("CONTENTION" if enable_contention else "NO CONTENTION")
     mode_parts.append("DTMC" if enable_dtmc else "NO DTMC")
     mode_label = " + ".join(mode_parts)
@@ -1167,6 +1193,21 @@ def run_multi_vehicle_loop(
             enable_contention=False,
             enable_dtmc=False,
         )
+    # 5th variant: fully opportunistic (no model, no DTMC, no contention)
+    if enable_pqos:
+        run_multi_vehicle_loop(
+            input_csv=input_csv,
+            model_type=model_type,
+            seed=seed,
+            retrain_interval=retrain_interval,
+            base_packet_size=base_packet_size,
+            correction_exponent=correction_exponent,
+            num_vehicles=num_vehicles,
+            sim_tx_interval_ms=sim_tx_interval_ms,
+            enable_contention=False,
+            enable_dtmc=False,
+            enable_pqos=False,
+        )
 
     return summary
 
@@ -1192,6 +1233,8 @@ def main():
                         help="Override TX interval in ms for all RATs (default: per-RAT from config)")
     parser.add_argument("--no-dtmc", action="store_true",
                         help="Disable DTMC adaptive packet sizing (use fixed base_packet_size)")
+    parser.add_argument("--no-pqos", action="store_true",
+                        help="Disable pQoS model inference (opportunistic baseline)")
     args = parser.parse_args()
 
     if args.num_vehicles > 1:
@@ -1205,6 +1248,7 @@ def main():
             num_vehicles=args.num_vehicles,
             sim_tx_interval_ms=args.tx_interval,
             enable_dtmc=not args.no_dtmc,
+            enable_pqos=not args.no_pqos,
         )
     else:
         run_feedback_loop(
@@ -1216,6 +1260,7 @@ def main():
             correction_exponent=args.correction_exponent,
             sim_tx_interval_ms=args.tx_interval,
             enable_dtmc=not args.no_dtmc,
+            enable_pqos=not args.no_pqos,
         )
 
 
