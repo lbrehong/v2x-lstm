@@ -132,6 +132,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, help="Number of training epochs (default: 100)")
     parser.add_argument("--model", type=str, required=True, choices=['lstm', 'gru', 'rnn'],
                         help="RNN architecture type: lstm, gru, or rnn (SimpleRNN)")
+    parser.add_argument("--seed", type=int, help="Random seed for reproducible training")
     return parser.parse_args()
 
 
@@ -249,6 +250,10 @@ def main():
     ensure_dir_exists(config.OUTPUT_DIR)
 
     args = parse_args()
+
+    if args.seed is not None:
+        from learning.seed import set_tf_seed
+        set_tf_seed(args.seed)
 
     PATH = args.data
     PATH_NEW = args.new_data

@@ -33,6 +33,7 @@ def get_latest_model(
     rat: str,
     model_dir: str = MODEL_DIR,
     include_retrained: bool = False,
+    extension: str = "keras",
 ) -> Optional[str]:
     """
     Find the most recent model file based on the model type and RAT.
@@ -42,14 +43,16 @@ def get_latest_model(
         rat: RAT type ('5g', 'pc5', 'dsrc')
         model_dir: Directory containing saved models
         include_retrained: If False (default), skip retrained_* files
+        extension: Model file extension without dot (default: "keras";
+            pass "pt" to look up PyTorch checkpoints instead)
 
     Returns:
         Path to most recent model, or None if not found
     """
-    pattern = os.path.join(model_dir, f"*{model_type}_{rat}_*.keras")
+    pattern = os.path.join(model_dir, f"*{model_type}_{rat}_*.{extension}")
     model_files = glob.glob(pattern)
 
-    regex = re.compile(rf"(?:retrained_)?{model_type}_{rat}_(\d+)\.keras")
+    regex = re.compile(rf"(?:retrained_)?{model_type}_{rat}_(\d+)\.{extension}")
     files_with_time = []
 
     for filepath in model_files:
