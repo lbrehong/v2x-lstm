@@ -1,0 +1,4 @@
+Validation type 1 - 5g/rnn - stage=trained
+
+latency_ms: mean=1.209e-02 max=1.309e-01 p50=9.921e-03 p95=3.083e-02 p99=4.308e-02
+pdr: mean=8.845e-05 max=1.924e-03 p50=5.127e-05 p95=2.920e-04 p99=5.680e-04

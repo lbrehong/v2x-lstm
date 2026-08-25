@@ -1,0 +1,4 @@
+Validation type 1 - pc5/lstm - stage=init
+
+latency_ms: mean=4.206e-08 max=1.196e-07 p50=0.000e+00 p95=1.191e-07 p99=1.193e-07
+pdr: mean=4.200e-08 max=1.153e-07 p50=0.000e+00 p95=1.111e-07 p99=1.128e-07

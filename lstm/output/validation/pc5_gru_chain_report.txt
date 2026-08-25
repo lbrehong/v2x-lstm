@@ -1,0 +1,11 @@
+Validation type 2 - pc5/gru - n_sequences=10, seq_length=5, start_index=23381
+
+input: mean=0.000e+00 max=0.000e+00
+hidden_states: mean=2.164e-07 max=1.632e-04
+last_hidden: mean=2.064e-07 max=1.204e-05
+dense_out: mean=2.040e-07 max=4.991e-06
+latency_pre: mean=1.138e-06 max=2.654e-06
+latency_post: mean=1.196e-08 max=1.196e-07
+pdr_pre: mean=1.501e-06 max=2.994e-06
+pdr_post: mean=0.000e+00 max=0.000e+00
+prediction: mean=5.979e-09 max=1.196e-07

@@ -1,0 +1,4 @@
+Validation type 1 - pc5/rnn - stage=init
+
+latency_ms: mean=6.298e-08 max=2.353e-07 p50=9.919e-08 p95=1.842e-07 p99=2.147e-07
+pdr: mean=9.081e-08 max=3.601e-07 p50=6.933e-08 p95=2.194e-07 p99=2.749e-07

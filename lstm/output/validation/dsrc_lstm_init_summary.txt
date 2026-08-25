@@ -1,0 +1,4 @@
+Validation type 1 - dsrc/lstm - stage=init
+
+latency_ms: mean=4.527e-08 max=1.189e-07 p50=0.000e+00 p95=1.167e-07 p99=1.178e-07
+pdr: mean=4.159e-08 max=1.128e-07 p50=0.000e+00 p95=1.097e-07 p99=1.108e-07

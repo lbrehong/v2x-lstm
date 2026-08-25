@@ -1,0 +1,4 @@
+Validation type 1 - 5g/lstm - stage=trained
+
+latency_ms: mean=9.191e-03 max=1.514e-01 p50=7.575e-03 p95=2.282e-02 p99=3.317e-02
+pdr: mean=8.108e-05 max=5.001e-04 p50=6.922e-05 p95=1.987e-04 p99=2.725e-04

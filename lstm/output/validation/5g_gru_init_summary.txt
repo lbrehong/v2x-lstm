@@ -1,0 +1,4 @@
+Validation type 1 - 5g/gru - stage=init
+
+latency_ms: mean=3.919e-08 max=1.256e-07 p50=6.096e-08 p95=1.231e-07 p99=1.242e-07
+pdr: mean=4.066e-08 max=1.879e-07 p50=6.030e-08 p95=1.195e-07 p99=1.249e-07

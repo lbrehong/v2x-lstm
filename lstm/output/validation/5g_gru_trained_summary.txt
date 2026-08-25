@@ -1,0 +1,4 @@
+Validation type 1 - 5g/gru - stage=trained
+
+latency_ms: mean=1.614e-02 max=1.817e-01 p50=1.336e-02 p95=4.032e-02 p99=5.479e-02
+pdr: mean=1.119e-04 max=2.340e-03 p50=6.673e-05 p95=3.736e-04 p99=7.016e-04

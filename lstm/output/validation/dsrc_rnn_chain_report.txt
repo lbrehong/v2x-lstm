@@ -1,0 +1,11 @@
+Validation type 2 - dsrc/rnn - n_sequences=10, seq_length=5, start_index=34416
+
+input: mean=0.000e+00 max=0.000e+00
+hidden_states: mean=6.473e-07 max=1.230e-04
+last_hidden: mean=8.408e-07 max=4.728e-05
+dense_out: mean=2.835e-06 max=3.616e-04
+latency_pre: mean=1.153e-07 max=1.787e-07
+latency_post: mean=1.801e-08 max=9.020e-08
+pdr_pre: mean=1.604e-06 max=3.531e-06
+pdr_post: mean=1.026e-07 max=2.272e-07
+prediction: mean=6.032e-08 max=2.272e-07

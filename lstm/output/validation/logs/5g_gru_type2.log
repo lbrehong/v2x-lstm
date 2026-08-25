@@ -1,0 +1,22 @@
+2026-08-22 22:32:27.703530: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-08-22 22:32:27.704248: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:32] Could not find cuda drivers on your machine, GPU will not be used.
+2026-08-22 22:32:27.708365: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:32] Could not find cuda drivers on your machine, GPU will not be used.
+2026-08-22 22:32:27.722475: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:477] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1787430747.742813   53717 cuda_dnn.cc:8310] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1787430747.752063   53717 cuda_blas.cc:1418] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2026-08-22 22:32:27.774945: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-08-22 22:32:29.900576: E external/local_xla/xla/stream_executor/cuda/cuda_driver.cc:152] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+Validation type 2 - 5g/gru - n_sequences=10, seq_length=5, start_index=29322
+
+input: mean=0.000e+00 max=0.000e+00
+hidden_states: mean=1.374e-07 max=1.396e-05
+last_hidden: mean=1.287e-07 max=1.447e-06
+dense_out: mean=1.207e-07 max=1.781e-06
+latency_pre: mean=7.754e-07 max=1.194e-06
+latency_post: mean=1.213e-08 max=1.213e-07
+pdr_pre: mean=2.185e-07 max=5.783e-07
+pdr_post: mean=0.000e+00 max=0.000e+00
+prediction: mean=6.064e-09 max=1.213e-07
+Reports and figures written to output/validation

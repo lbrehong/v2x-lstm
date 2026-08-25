@@ -1,0 +1,11 @@
+Validation type 2 - dsrc/gru - n_sequences=10, seq_length=5, start_index=34416
+
+input: mean=0.000e+00 max=0.000e+00
+hidden_states: mean=1.403e-07 max=2.341e-05
+last_hidden: mean=2.063e-07 max=2.341e-05
+dense_out: mean=1.915e-07 max=1.477e-05
+latency_pre: mean=4.910e-07 max=8.558e-07
+latency_post: mean=1.200e-08 max=1.200e-07
+pdr_pre: mean=1.648e-07 max=4.726e-07
+pdr_post: mean=0.000e+00 max=0.000e+00
+prediction: mean=5.999e-09 max=1.200e-07

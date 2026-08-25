@@ -1,0 +1,12 @@
+Validation type 2 - 5g/lstm - n_sequences=10, seq_length=5, start_index=29322
+
+input: mean=0.000e+00 max=0.000e+00
+hidden_states: mean=6.421e-07 max=8.183e-04
+cell_states: mean=5.480e-07 max=8.183e-04
+last_hidden: mean=3.832e-07 max=4.510e-06
+dense_out: mean=8.970e-07 max=3.348e-05
+latency_pre: mean=4.152e-07 max=7.925e-07
+latency_post: mean=2.298e-08 max=1.149e-07
+pdr_pre: mean=2.100e-07 max=3.700e-07
+pdr_post: mean=0.000e+00 max=0.000e+00
+prediction: mean=1.149e-08 max=1.149e-07

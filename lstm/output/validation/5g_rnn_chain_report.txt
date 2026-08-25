@@ -1,0 +1,11 @@
+Validation type 2 - 5g/rnn - n_sequences=10, seq_length=5, start_index=29322
+
+input: mean=0.000e+00 max=0.000e+00
+hidden_states: mean=5.306e-07 max=4.073e-04
+last_hidden: mean=1.144e-06 max=4.073e-04
+dense_out: mean=2.230e-07 max=2.927e-06
+latency_pre: mean=1.485e-07 max=3.471e-07
+latency_post: mean=3.589e-08 max=8.988e-08
+pdr_pre: mean=6.417e-07 max=1.559e-06
+pdr_post: mean=6.459e-08 max=2.158e-07
+prediction: mean=5.024e-08 max=2.158e-07

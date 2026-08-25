@@ -1,0 +1,4 @@
+Validation type 1 - dsrc/gru - stage=init
+
+latency_ms: mean=4.142e-08 max=1.789e-07 p50=5.999e-08 p95=1.191e-07 p99=1.219e-07
+pdr: mean=4.449e-08 max=1.311e-07 p50=6.294e-08 p95=1.284e-07 p99=1.307e-07

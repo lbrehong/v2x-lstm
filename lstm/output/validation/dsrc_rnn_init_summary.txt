@@ -1,0 +1,4 @@
+Validation type 1 - dsrc/rnn - stage=init
+
+latency_ms: mean=8.072e-08 max=1.516e-06 p50=8.689e-08 p95=1.888e-07 p99=6.128e-07
+pdr: mean=3.547e-07 max=3.370e-06 p50=1.087e-07 p95=2.548e-06 p99=3.122e-06

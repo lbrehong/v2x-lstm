@@ -1,0 +1,11 @@
+Validation type 2 - pc5/rnn - n_sequences=10, seq_length=5, start_index=23381
+
+input: mean=0.000e+00 max=0.000e+00
+hidden_states: mean=6.324e-07 max=9.015e-05
+last_hidden: mean=1.077e-06 max=5.429e-05
+dense_out: mean=5.740e-07 max=2.496e-05
+latency_pre: mean=3.140e-07 max=9.112e-07
+latency_post: mean=0.000e+00 max=0.000e+00
+pdr_pre: mean=1.295e-05 max=9.122e-05
+pdr_post: mean=8.325e-08 max=2.332e-07
+prediction: mean=4.163e-08 max=2.332e-07

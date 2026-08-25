@@ -36,3 +36,7 @@ bkp/
 
 # Results viewer
 results.ipynb
+
+# Migration validation results (tracked for grading)
+!output/
+!output/**
