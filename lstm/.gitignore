@@ -40,3 +40,4 @@ results.ipynb
 # Migration validation results (tracked for grading)
 !output/
 !output/**
+output/*.npz
