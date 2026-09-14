@@ -13,7 +13,6 @@ import os
 from typing import Optional, Dict, Tuple, List
 import numpy as np
 import pandas as pd
-from keras.models import load_model
 
 from api_types import (
     RATType, NetworkState, QueueContext, RATDecision,
@@ -22,13 +21,13 @@ from api_types import (
 from config import (
     MODEL_DIR, OUTPUT_DIR, TIMESTEPS, TARGET_COLS,
     PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS,
-    PACKET_SIZE_BOUNDS,
+    PACKET_SIZE_BOUNDS, DEFAULT_RATS, validate_rats,
     create_gps_scaler, create_latency_scaler,
     create_sinr_5g_scaler, create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
 )
 from queuesim.phy_layer import compute_contention_pdr
 from utils import get_latest_model
-from learning.model import rmse
+from learning.model import load_torch_model, predict_torch
 from learning.data_preprocessing import preprocess_lstm_input
 
 
@@ -50,22 +49,27 @@ class RATSelectionAPI:
         latency_margin: Latency tie-breaking margin in ms
     """
 
-    def __init__(self, model_type: str = "lstm", model_dir: str = MODEL_DIR):
+    def __init__(self, model_type: str = "lstm", model_dir: str = MODEL_DIR,
+                 rats=DEFAULT_RATS):
         """
         Initialize the RAT Selection API.
 
         Args:
             model_type: RNN model architecture ('lstm', 'gru', 'rnn')
             model_dir: Directory containing saved model files
+            rats: RATs eligible for selection (default: DEFAULT_RATS). Models
+                  of other RATs are never loaded, even if present in model_dir.
         """
         self.model_type = model_type
         self.model_dir = model_dir
+        self.rats = validate_rats(rats)
+        self._rat_enums = [(rat, RATType.from_string(rat)) for rat in self.rats]
         self.models: Dict[str, object] = {}
         self.gps_scaler = create_gps_scaler()
         self.latency_scaler = create_latency_scaler()  # global fallback
         self.latency_scalers = {
             rat: create_latency_scaler(rat)
-            for rat in ("5g", "pc5", "dsrc")
+            for rat in self.rats
         }
         self.sinr_5g_scaler = create_sinr_5g_scaler()
         self.rsrp_5g_scaler = create_rsrp_5g_scaler()
@@ -84,21 +88,17 @@ class RATSelectionAPI:
         self._previous_rat: RATType = RATType.FiveG
 
         # Sequence history for predictions
-        self._history: Dict[str, List[np.ndarray]] = {
-            "dsrc": [],
-            "pc5": [],
-            "5g": [],
-        }
+        self._history: Dict[str, List[np.ndarray]] = {rat: [] for rat in self.rats}
 
         # Load models
         self._load_models()
 
     def _load_models(self) -> None:
-        """Load all RAT models for the specified model type."""
-        for rat in ["dsrc", "pc5", "5g"]:
+        """Load the models of the selected RATs for the specified model type."""
+        for rat in self.rats:
             model_path = get_latest_model(self.model_type, rat, self.model_dir)
             if model_path:
-                self.models[rat] = load_model(model_path, custom_objects={"rmse": rmse})
+                self.models[rat] = load_torch_model(model_path)
                 print(f"Loaded {self.model_type} model for {rat}")
             else:
                 print(f"Warning: No model found for {self.model_type}_{rat}")
@@ -196,16 +196,16 @@ class RATSelectionAPI:
         """
         predictions = {}
 
-        for rat_str, rat_enum in [("dsrc", RATType.DSRC), ("pc5", RATType.PC5), ("5g", RATType.FiveG)]:
+        for rat_str, rat_enum in self._rat_enums:
             if rat_str not in self.models:
                 continue
 
             model = self.models[rat_str]
             sequence = self._build_sequence(state, rat_str)
 
-            pred = model.predict(sequence, verbose=0)
-            pred_latency = pred[0].flatten()[0]
-            pred_pdr = pred[1].flatten()[0]
+            pred_lat_arr, pred_pdr_arr = predict_torch(model, sequence)
+            pred_latency = pred_lat_arr[0]
+            pred_pdr = pred_pdr_arr[0]
 
             # Clamp normalized outputs to [0, 1] and denormalize
             pred_latency = float(np.clip(pred_latency, 0.0, 1.0))
@@ -344,7 +344,7 @@ class RATSelectionAPI:
         # Build options list: (rat_enum, pred_latency, effective_pdr, actual_pdr)
         # effective_pdr = contention-corrected if context provided, else raw pred_pdr
         options = []
-        for rat_str, rat_enum in [("dsrc", RATType.DSRC), ("pc5", RATType.PC5), ("5g", RATType.FiveG)]:
+        for rat_str, rat_enum in self._rat_enums:
             if rat_enum in all_predictions:
                 pred_lat, pred_pdr = all_predictions[rat_enum]
                 actual_pdr = self._get_actual_pdr(state, rat_enum)
@@ -472,11 +472,10 @@ class RATSelectionAPI:
         """
         # Build options from actual observed metrics: (rat_str, rat_enum, latency, pdr)
         options = []
-        for rat_str, rat_enum, lat_val, pdr_val in [
-            ("dsrc", RATType.DSRC, state.dsrc_latency_ms, state.dsrc_pdr),
-            ("pc5", RATType.PC5, state.pc5_latency_ms, state.pc5_pdr),
-            ("5g", RATType.FiveG, state.fiveg_latency_ms, state.fiveg_pdr),
-        ]:
+        for rat_str, rat_enum in self._rat_enums:
+            field_prefix = "fiveg" if rat_str == "5g" else rat_str
+            lat_val = getattr(state, f"{field_prefix}_latency_ms")
+            pdr_val = getattr(state, f"{field_prefix}_pdr")
             latency = lat_val if lat_val is not None else 0.0
             pdr = pdr_val if pdr_val is not None else 0.0
             options.append((rat_str, rat_enum, latency, pdr))
@@ -504,7 +503,7 @@ class RATSelectionAPI:
         elif len(valid_options) == 1 and valid_options[0][0] == "5g":
             selected_rat = RATType.FiveG
         elif self._previous_rat == RATType.FiveG and any(
-            opt[0] in ("dsrc", "pc5") for opt in valid_options
+            opt[0] != "5g" for opt in valid_options
         ):
             # On 5G and V2X available → switch to lowest latency
             best = min(valid_options, key=lambda x: x[2])
@@ -554,9 +553,7 @@ class RATSelectionAPI:
     def _retrain_models(self) -> None:
         """Trigger model retraining with buffered outcomes."""
         # Group outcomes by RAT
-        outcomes_by_rat: Dict[str, List[TransmissionOutcome]] = {
-            "dsrc": [], "pc5": [], "5g": []
-        }
+        outcomes_by_rat: Dict[str, List[TransmissionOutcome]] = {rat: [] for rat in self.rats}
         for outcome in self.outcome_buffer:
             rat_str = outcome.rat_used.value
             if rat_str in outcomes_by_rat:
@@ -569,7 +566,7 @@ class RATSelectionAPI:
 
             print(f"Retraining {self.model_type}_{rat} with {len(outcomes)} samples")
             # Note: Full retraining implementation would convert outcomes to
-            # training data and call incremental_train. This is a placeholder.
+            # training data and call incremental_train_torch. This is a placeholder.
 
     def set_thresholds(
         self,

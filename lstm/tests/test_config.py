@@ -19,7 +19,29 @@ from config import (
     create_throughput_scaler, create_sinr_5g_scaler,
     create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
     create_all_scalers,
+    ALL_RATS, DEFAULT_RATS, validate_rats,
 )
+
+
+class TestRatSet:
+    """Tests for the selectable RAT set."""
+
+    def test_default_rats_exclude_dsrc(self):
+        """Default RAT set matches the DRL agent's action space (5G, PC5)."""
+        assert set(DEFAULT_RATS) == {"5g", "pc5"}
+        assert set(DEFAULT_RATS) <= set(ALL_RATS)
+
+    def test_validate_rats_orders_and_deduplicates(self):
+        assert validate_rats(["5g", "DSRC", "pc5", "5g"]) == ALL_RATS
+        assert validate_rats(["5g", "pc5"]) == DEFAULT_RATS
+
+    def test_validate_rats_rejects_unknown(self):
+        with pytest.raises(ValueError):
+            validate_rats(["5g", "wifi"])
+
+    def test_validate_rats_rejects_empty(self):
+        with pytest.raises(ValueError):
+            validate_rats([])
 
 
 class TestConfigConstants:
@@ -170,14 +192,11 @@ class TestPerRatLatencyScaler:
             assert scaler is not None
 
     def test_per_rat_scaler_bounds(self):
-        """Per-RAT scalers should use tighter bounds than global."""
-        global_scaler = create_latency_scaler()
-        for rat in ("5g", "pc5", "dsrc"):
-            rat_scaler = create_latency_scaler(rat)
-            # 50ms should scale higher with per-RAT scaler (tighter bounds)
-            global_val = global_scaler.transform([[50.0]])[0][0]
-            rat_val = rat_scaler.transform([[50.0]])[0][0]
-            assert rat_val >= global_val
+        """Per-RAT scalers should map their own latency bounds to [0, 1]."""
+        from config import LATENCY_BOUNDS
+        for rat, (lo, hi) in LATENCY_BOUNDS.items():
+            scaled = create_latency_scaler(rat).transform([[lo], [hi]]).ravel()
+            np.testing.assert_array_almost_equal(scaled, [0.0, 1.0])
 
     def test_per_rat_scaler_roundtrip(self):
         """Per-RAT scalers should correctly roundtrip values."""

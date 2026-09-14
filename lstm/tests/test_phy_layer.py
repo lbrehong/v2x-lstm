@@ -238,10 +238,11 @@ class TestRBCapacityModel:
             assert queue_capacity == tx_capacity * multiplier
 
     def test_capacity_ordering(self):
-        """5G should have highest capacity, PC5 lowest."""
-        tx_5g = calculate_tx_capacity_bytes(RATType.FiveG, get_tx_interval_ms(RATType.FiveG))
-        tx_dsrc = calculate_tx_capacity_bytes(RATType.DSRC, get_tx_interval_ms(RATType.DSRC))
-        tx_pc5 = calculate_tx_capacity_bytes(RATType.PC5, get_tx_interval_ms(RATType.PC5))
+        """Over the same interval, 5G should have the highest capacity, PC5 the lowest."""
+        interval_ms = 100
+        tx_5g = calculate_tx_capacity_bytes(RATType.FiveG, interval_ms)
+        tx_dsrc = calculate_tx_capacity_bytes(RATType.DSRC, interval_ms)
+        tx_pc5 = calculate_tx_capacity_bytes(RATType.PC5, interval_ms)
         assert tx_5g > tx_dsrc
         assert tx_dsrc > tx_pc5
 
@@ -275,9 +276,9 @@ class TestComputeChannelUtilization:
         assert util < 0.15
 
     def test_pc5_overloaded(self):
-        """PC5 with 20 vehicles @ 2KB should be overloaded (utilization > 1.0)."""
+        """PC5 with 20 vehicles sending 2KB every 20 ms should be overloaded (utilization > 1.0)."""
         sizes = [2048] * 20
-        util = compute_channel_utilization(20, sizes, RATType.PC5)
+        util = compute_channel_utilization(20, sizes, RATType.PC5, tx_interval_ms=20)
         assert util > 1.0
 
     def test_dsrc_moderate(self):
@@ -364,8 +365,8 @@ class TestComputeContentionPdr:
     def test_pc5_birthday_degradation(self):
         """PC5 should degrade PDR via birthday-problem (subchannel, subframe) collisions."""
         result = compute_contention_pdr(0.99, 1.0, RATType.PC5, 20)
-        # 100 resource slots (5 subch × 20 subframes): 0.99 × 0.826 ≈ 0.82
-        assert 0.7 < result < 0.95
+        # 500 resource slots (5 subch × 100 subframes per 100 ms TX interval): 0.99 × 0.963 ≈ 0.953
+        assert 0.9 < result < 0.99
 
     def test_dsrc_cbr_degradation(self):
         """DSRC should degrade PDR with moderate utilization."""

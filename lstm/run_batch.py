@@ -29,6 +29,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from config import ALL_RATS, DEFAULT_RATS
+
 # Default vehicle counts for the sweep
 DEFAULT_VEHICLES = [1, 2, 5, 10, 20, 50, 100]
 DEFAULT_MODELS = ["lstm", "gru", "rnn"]
@@ -62,6 +64,9 @@ def parse_args() -> argparse.Namespace:
                        help=f"Vehicle counts to sweep (default: {DEFAULT_VEHICLES})")
     sweep.add_argument("--seed", type=int, default=42,
                        help="Random seed (default: 42)")
+    sweep.add_argument("--rats", nargs="+", default=list(DEFAULT_RATS),
+                       choices=ALL_RATS,
+                       help=f"RATs involved in every run (default: {' '.join(DEFAULT_RATS)})")
 
     opts = p.add_argument_group("Pipeline options")
     opts.add_argument("--epochs", type=int, default=0,
@@ -211,6 +216,7 @@ def main() -> None:
         skip_args.append("--skip_matching")
 
     epoch_args = ["--epochs", str(args.epochs)] if args.epochs else []
+    rats_args = ["--rats", *args.rats]
 
     # Build the full run matrix
     n_train = 0 if skip_training else len(args.models)
@@ -230,6 +236,7 @@ def main() -> None:
     print(f"  Models:     {args.models}")
     print(f"  Vehicles:   {args.vehicles}")
     print(f"  Seed:       {args.seed}")
+    print(f"  RATs:       {args.rats}")
     if args.train_data:
         print(f"  Train data: {args.train_data}")
     print(f"  Infer data: {args.infer_data}")
@@ -253,6 +260,7 @@ def main() -> None:
             argv = [
                 *train_data_args,
                 "--model", model,
+                *rats_args,
                 *skip_args,
                 *epoch_args,
                 "--skip_feedback",
@@ -278,6 +286,7 @@ def main() -> None:
             argv = [
                 "--data", args.infer_data,
                 "--model", model,
+                *rats_args,
                 "--load", "existing",
                 "--skip_trimming",
                 "--skip_matching",
@@ -314,6 +323,7 @@ def main() -> None:
                 *infer_data_args,
                 *merged_csv_args,
                 "--model", model,
+                *rats_args,
                 "--load", "existing",
                 "--skip_trimming",
                 "--skip_matching",

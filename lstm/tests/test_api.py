@@ -29,13 +29,29 @@ from config import (
     PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD,
     LATENCY_TIE_MARGIN_MS, TIMESTEPS, PACKET_SIZE_BOUNDS,
 )
+import torch
+import torch.nn as nn
+
+
+class ConstantModel(nn.Module):
+    """Stand-in for a RATPredictor that always predicts the same normalized latency and PDR."""
+
+    def __init__(self, latency, pdr):
+        super().__init__()
+        self.dummy = nn.Parameter(torch.zeros(1))  # predict_torch reads the device from parameters
+        self.latency = latency
+        self.pdr = pdr
+
+    def forward(self, x):
+        batch = x.shape[0]
+        return torch.full((batch, 1), self.latency), torch.full((batch, 1), self.pdr)
 
 
 class TestRATSelectionAPIInitialization:
     """Tests for RATSelectionAPI initialization."""
 
     @patch('selection.api.get_latest_model')
-    @patch('selection.api.load_model')
+    @patch('selection.api.load_torch_model')
     def test_api_initialization(self, mock_load_model, mock_get_latest_model):
         """API should initialize with model type and load models."""
         mock_get_latest_model.return_value = None  # No models available
@@ -50,7 +66,7 @@ class TestRATSelectionAPIInitialization:
         assert api.retrain_interval == 500
 
     @patch('selection.api.get_latest_model')
-    @patch('selection.api.load_model')
+    @patch('selection.api.load_torch_model')
     def test_api_initialization_with_gru(self, mock_load_model, mock_get_latest_model):
         """API should support gru model type."""
         mock_get_latest_model.return_value = None
@@ -61,27 +77,59 @@ class TestRATSelectionAPIInitialization:
         assert api.model_type == "gru"
 
     @patch('selection.api.get_latest_model')
-    @patch('selection.api.load_model')
+    @patch('selection.api.load_torch_model')
     def test_api_history_initialized_empty(self, mock_load_model, mock_get_latest_model):
-        """API history should be initialized as empty for all RATs."""
+        """API history should be initialized as empty for the default RATs (no DSRC)."""
         mock_get_latest_model.return_value = None
 
         from selection.api import RATSelectionAPI
         api = RATSelectionAPI(model_type="lstm")
 
-        assert "dsrc" in api._history
-        assert "pc5" in api._history
-        assert "5g" in api._history
-        assert len(api._history["dsrc"]) == 0
-        assert len(api._history["pc5"]) == 0
-        assert len(api._history["5g"]) == 0
+        assert set(api._history) == {"pc5", "5g"}
+        assert all(len(h) == 0 for h in api._history.values())
+
+    @patch('selection.api.get_latest_model')
+    @patch('selection.api.load_torch_model')
+    def test_api_history_includes_dsrc_when_selected(self, mock_load_model, mock_get_latest_model):
+        """Passing all RATs should restore a DSRC history."""
+        mock_get_latest_model.return_value = None
+
+        from config import ALL_RATS
+        from selection.api import RATSelectionAPI
+        api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
+
+        assert set(api._history) == {"dsrc", "pc5", "5g"}
+
+    @patch('selection.api.get_latest_model')
+    @patch('selection.api.load_torch_model')
+    def test_dsrc_model_not_loaded_by_default(self, mock_load_model, mock_get_latest_model):
+        """An existing DSRC model must not be loaded when DSRC is not selected."""
+        mock_get_latest_model.side_effect = lambda model_type, rat, model_dir: f"/fake/{model_type}_{rat}.pt"
+        mock_load_model.side_effect = lambda path: path
+
+        from selection.api import RATSelectionAPI
+        api = RATSelectionAPI(model_type="lstm")
+
+        assert set(api.models) == {"pc5", "5g"}
+        requested_rats = {call.args[1] for call in mock_get_latest_model.call_args_list}
+        assert "dsrc" not in requested_rats
+
+    @patch('selection.api.get_latest_model')
+    @patch('selection.api.load_torch_model')
+    def test_invalid_rat_rejected(self, mock_load_model, mock_get_latest_model):
+        """Unknown RAT identifiers should raise."""
+        mock_get_latest_model.return_value = None
+
+        from selection.api import RATSelectionAPI
+        with pytest.raises(ValueError):
+            RATSelectionAPI(model_type="lstm", rats=["5g", "wifi"])
 
 
 class TestRATSelectionAPIThresholds:
     """Tests for threshold configuration."""
 
     @patch('selection.api.get_latest_model')
-    @patch('selection.api.load_model')
+    @patch('selection.api.load_torch_model')
     def test_set_thresholds(self, mock_load_model, mock_get_latest_model):
         """set_thresholds should update threshold values."""
         mock_get_latest_model.return_value = None
@@ -100,7 +148,7 @@ class TestRATSelectionAPIThresholds:
         assert api.latency_margin == 2.0
 
     @patch('selection.api.get_latest_model')
-    @patch('selection.api.load_model')
+    @patch('selection.api.load_torch_model')
     def test_set_thresholds_partial(self, mock_load_model, mock_get_latest_model):
         """set_thresholds should only update provided values."""
         mock_get_latest_model.return_value = None
@@ -122,7 +170,7 @@ class TestStateToFeatures:
     def api_instance(self):
         """Create API instance with mocked model loading."""
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
+             patch('selection.api.load_torch_model') as mock_load:
             mock_get.return_value = None
             from selection.api import RATSelectionAPI
             return RATSelectionAPI(model_type="lstm")
@@ -201,7 +249,7 @@ class TestSequenceBuilding:
     def api_instance(self):
         """Create API instance with mocked model loading."""
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
+             patch('selection.api.load_torch_model') as mock_load:
             mock_get.return_value = None
             from selection.api import RATSelectionAPI
             return RATSelectionAPI(model_type="lstm")
@@ -252,12 +300,11 @@ class TestSequenceBuilding:
         # Build some history
         for i in range(5):
             api_instance._build_sequence(sample_state, "pc5")
-            api_instance._build_sequence(sample_state, "dsrc")
+            api_instance._build_sequence(sample_state, "5g")
 
         api_instance.reset_history()
 
         assert len(api_instance._history["pc5"]) == 0
-        assert len(api_instance._history["dsrc"]) == 0
         assert len(api_instance._history["5g"]) == 0
 
 
@@ -268,7 +315,7 @@ class TestPacketSizeRecommendation:
     def api_instance(self):
         """Create API instance with mocked model loading."""
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
+             patch('selection.api.load_torch_model') as mock_load:
             mock_get.return_value = None
             from selection.api import RATSelectionAPI
             return RATSelectionAPI(model_type="lstm")
@@ -316,21 +363,17 @@ class TestRATSelectionWithMockedModels:
     def api_with_mock_models(self):
         """Create API with mocked models that return predictable values."""
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
+             patch('selection.api.load_torch_model') as mock_load:
 
-            # Create mock models
-            mock_model = Mock()
-            # Model returns [latency_output, pdr_output]
-            mock_model.predict.return_value = [
-                np.array([[0.3]]),  # normalized latency
-                np.array([[0.995]]),  # pdr
-            ]
+            # Model returns (normalized latency, pdr)
+            mock_model = ConstantModel(latency=0.3, pdr=0.995)
 
-            mock_get.return_value = "/fake/model/path.keras"
+            mock_get.return_value = "/fake/model/path.pt"
             mock_load.return_value = mock_model
 
+            from config import ALL_RATS
             from selection.api import RATSelectionAPI
-            api = RATSelectionAPI(model_type="lstm")
+            api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
 
             # Set models manually since they're loaded via mocks
             api.models = {
@@ -411,20 +454,18 @@ class TestRATSelectionWithMockedModels:
         because low predictions early in simulation are model warm-up artifacts.
         """
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
-            mock_get.return_value = "/fake/model/path.keras"
+             patch('selection.api.load_torch_model') as mock_load:
+            mock_get.return_value = "/fake/model/path.pt"
 
             # All models predict low PDR (below threshold of 0.99)
-            mock_model_low = Mock()
-            mock_model_low.predict.return_value = [
-                np.array([[0.1]]),   # normalized latency
-                np.array([[0.50]]),  # PDR well below 0.99 threshold
-            ]
+            # PDR well below 0.99 threshold
+            mock_model_low = ConstantModel(latency=0.1, pdr=0.50)
 
             mock_load.return_value = mock_model_low
 
+            from config import ALL_RATS
             from selection.api import RATSelectionAPI
-            api = RATSelectionAPI(model_type="lstm")
+            api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
             api.models = {"dsrc": mock_model_low, "pc5": mock_model_low, "5g": mock_model_low}
 
             contention_ctx = {
@@ -445,30 +486,19 @@ class TestRATSelectionWithMockedModels:
         effective_pdr among those whose actual_pdr >= pdr_availability.
         """
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
-            mock_get.return_value = "/fake/model/path.keras"
+             patch('selection.api.load_torch_model') as mock_load:
+            mock_get.return_value = "/fake/model/path.pt"
 
             # DSRC predicts highest PDR (but still below threshold)
-            mock_dsrc = Mock()
-            mock_dsrc.predict.return_value = [
-                np.array([[0.1]]),
-                np.array([[0.95]]),  # highest among the three, still < 0.99
-            ]
-            mock_pc5 = Mock()
-            mock_pc5.predict.return_value = [
-                np.array([[0.1]]),
-                np.array([[0.90]]),
-            ]
-            mock_5g = Mock()
-            mock_5g.predict.return_value = [
-                np.array([[0.1]]),
-                np.array([[0.85]]),  # lowest
-            ]
+            mock_dsrc = ConstantModel(latency=0.1, pdr=0.95)  # highest among the three, still < 0.99
+            mock_pc5 = ConstantModel(latency=0.1, pdr=0.90)
+            mock_5g = ConstantModel(latency=0.1, pdr=0.85)  # lowest
 
             mock_load.return_value = mock_dsrc  # default for loading
 
+            from config import ALL_RATS
             from selection.api import RATSelectionAPI
-            api = RATSelectionAPI(model_type="lstm")
+            api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
             api.models = {"dsrc": mock_dsrc, "pc5": mock_pc5, "5g": mock_5g}
 
             # No contention context — original fallback
@@ -476,6 +506,28 @@ class TestRATSelectionWithMockedModels:
 
             # DSRC has highest effective_pdr (0.95) and actual_pdr >= availability
             assert decision.selected_rat == RATType.DSRC
+
+    def test_default_rats_never_select_dsrc(self, sample_state):
+        """With the default RAT set, DSRC is ignored even when its model is the best."""
+        with patch('selection.api.get_latest_model') as mock_get, \
+             patch('selection.api.load_torch_model'):
+            mock_get.return_value = None
+
+            from selection.api import RATSelectionAPI
+            api = RATSelectionAPI(model_type="lstm")
+            api.models = {
+                "dsrc": ConstantModel(latency=0.01, pdr=1.0),  # best on every metric
+                "pc5": ConstantModel(latency=0.3, pdr=0.995),
+                "5g": ConstantModel(latency=0.5, pdr=0.995),
+            }
+
+            decision = api.select_rat(sample_state)
+            opp_decision = api.select_rat_opportunistic(sample_state)
+
+            assert decision.selected_rat == RATType.PC5
+            assert RATType.DSRC not in decision.all_predictions
+            assert opp_decision.selected_rat != RATType.DSRC
+            assert RATType.DSRC not in opp_decision.all_predictions
 
     def test_fallback_with_contention_no_5g_model(self, sample_state):
         """With contention context but no 5G model, falls through to generic fallback.
@@ -485,25 +537,18 @@ class TestRATSelectionWithMockedModels:
         to the generic max(effective_pdr) fallback among available RATs.
         """
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
-            mock_get.return_value = "/fake/model/path.keras"
+             patch('selection.api.load_torch_model') as mock_load:
+            mock_get.return_value = "/fake/model/path.pt"
 
             # Only DSRC and PC5 models, no 5G
-            mock_dsrc = Mock()
-            mock_dsrc.predict.return_value = [
-                np.array([[0.1]]),
-                np.array([[0.90]]),  # below threshold
-            ]
-            mock_pc5 = Mock()
-            mock_pc5.predict.return_value = [
-                np.array([[0.1]]),
-                np.array([[0.93]]),  # below threshold, but highest
-            ]
+            mock_dsrc = ConstantModel(latency=0.1, pdr=0.90)  # below threshold
+            mock_pc5 = ConstantModel(latency=0.1, pdr=0.93)  # below threshold, but highest
 
             mock_load.return_value = mock_dsrc
 
+            from config import ALL_RATS
             from selection.api import RATSelectionAPI
-            api = RATSelectionAPI(model_type="lstm")
+            api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
             # No 5G model loaded
             api.models = {"dsrc": mock_dsrc, "pc5": mock_pc5}
 
@@ -526,7 +571,7 @@ class TestOutcomeReporting:
     def api_instance(self):
         """Create API instance with mocked model loading."""
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
+             patch('selection.api.load_torch_model') as mock_load:
             mock_get.return_value = None
             from selection.api import RATSelectionAPI
             return RATSelectionAPI(model_type="lstm")
@@ -697,7 +742,7 @@ class TestConfidenceComputation:
     def api_instance(self):
         """Create API instance with mocked model loading."""
         with patch('selection.api.get_latest_model') as mock_get, \
-             patch('selection.api.load_model') as mock_load:
+             patch('selection.api.load_torch_model') as mock_load:
             mock_get.return_value = None
             from selection.api import RATSelectionAPI
             return RATSelectionAPI(model_type="lstm")

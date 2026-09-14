@@ -81,11 +81,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     model.add_argument("--model", default="lstm",
                        choices=["lstm", "gru", "rnn"],
                        help="Model architecture (default: lstm)")
-    model.add_argument("--rats", nargs="+", default=["5g", "pc5", "dsrc"],
-                       help="RATs to train (default: 5g pc5 dsrc)")
+    model.add_argument("--rats", nargs="+", default=list(config.DEFAULT_RATS),
+                       choices=config.ALL_RATS,
+                       help="RATs involved in every stage: matching, training, "
+                            f"selection and feedback (default: {' '.join(config.DEFAULT_RATS)})")
     model.add_argument("--load", default="none",
                        help='Model loading: "none"=train fresh (default), '
-                            '"existing"=load latest, or path to .keras')
+                            '"existing"=load latest, or path to .pt')
     model.add_argument("--epochs", type=int, default=0,
                        help="Training epochs (default: 100 from config)")
 
@@ -119,84 +121,32 @@ def parse_args(argv=None) -> argparse.Namespace:
     if not any([args.raw_data, args.data, args.npz, args.merged_csv]):
         p.error("provide at least one of --raw_data, --data, --npz, or --merged_csv")
 
+    args.rats = config.validate_rats(args.rats)
+
     return args
 
 
 def stage_trim(args) -> None:
-    """Stage 1: Trim raw logs using direct function calls."""
+    """Stage 1: Ingest raw logs into cohda-compatible df_*.json, then trimmed CSVs."""
     if not args.raw_data or args.skip_trimming:
         print("-- Skipping trimming (no --raw_data or --skip_trimming)")
         return
 
     banner("Stage 1: Trimming raw logs")
 
-    from scripts.trimmers import (find_files_with_string, trim_sa, trim_pc5,
-                                   trim_dsrc, get_first_timestamp, append_files)
+    from scripts.ingest_logs import ingest_dataset
+    from scripts.convert_json_to_trim import convert_all
 
-    RAW = args.raw_data
-    # Write trimmed output to --data if provided, otherwise into --raw_data
-    OUT = args.data if args.data else RAW
+    # Write outputs to --data if provided, otherwise next to the raw logs
+    out = args.data if args.data else os.path.join(args.raw_data, "trimmed")
+    print(f"Raw logs:       {args.raw_data}")
+    print(f"Trimmed output: {out}")
 
-    if OUT != RAW:
-        os.makedirs(OUT, exist_ok=True)
-        print(f"Raw logs:       {RAW}")
-        print(f"Trimmed output: {OUT}")
+    # Per-tour df_*.json plus merged top-level files, then trim_*.csv from the merge
+    ingest_dataset(args.raw_data, out)
+    convert_all(out, out)
 
-    # Raw logs are not CSVs; exclude pipeline outputs that may be in the same dir
-    files_dsrc = [f for f in find_files_with_string(RAW, "dsrc") if not f.endswith(".csv")]
-    files_pc5 = [f for f in find_files_with_string(RAW, "pc5") if not f.endswith(".csv")]
-    files_5g = [f for f in find_files_with_string(RAW, "5g") if not f.endswith(".csv")]
-    print("Matching DSRC files: ", files_dsrc)
-    print("Matching PC5 files: ", files_pc5)
-    print("Matching 5G files: ", files_5g)
-
-    sa_data = trim_sa(files_5g, os.path.join(OUT, "trim_5g.csv"), RAW)
-
-    combined_out_pc5 = 0
-    combined_out_dsrc = 0
-    trimmed_files_pc5 = []
-    trimmed_files_dsrc = []
-
-    for i, file in enumerate(files_pc5):
-        output_file_pc5 = f"trim_pc5_{i}.csv"
-        output_file_dsrc = f"trim_dsrc_{i}.csv"
-        print("Trimming PC5 file ", file)
-        out_pc5, pc5_data = trim_pc5(os.path.join(RAW, file),
-                                      os.path.join(OUT, output_file_pc5))
-        print(f"Generated {out_pc5} lines for PC5")
-        combined_out_pc5 += out_pc5
-
-        rsu_id = file.split("_")[2]
-        try:
-            log_dsrc = [f for f in files_dsrc if rsu_id in f][0]
-        except IndexError:
-            print("No matching DSRC file found for ", file)
-            trimmed_files_pc5.append(os.path.join(OUT, output_file_pc5))
-            continue
-
-        print("Trimming DSRC file ", log_dsrc)
-        out_dsrc = trim_dsrc(os.path.join(RAW, log_dsrc),
-                              os.path.join(OUT, output_file_dsrc),
-                              pc5_data, sa_data)
-        print(f"Generated {out_dsrc} lines for DSRC")
-        combined_out_dsrc += out_dsrc
-        trimmed_files_pc5.append(os.path.join(OUT, output_file_pc5))
-        trimmed_files_dsrc.append(os.path.join(OUT, output_file_dsrc))
-
-    trimmed_files_pc5.sort(key=get_first_timestamp)
-    append_files(os.path.join(OUT, "trim_pc5.csv"), trimmed_files_pc5)
-    print(f"Combined trimmed PC5 files into trim_pc5.csv. Total lines: {combined_out_pc5}")
-
-    trimmed_files_dsrc.sort(key=get_first_timestamp)
-    append_files(os.path.join(OUT, "trim_dsrc.csv"), trimmed_files_dsrc)
-    print(f"Combined trimmed DSRC files into trim_dsrc.csv. Total lines: {combined_out_dsrc}")
-
-    # Clean up intermediate per-RSU trimmed files
-    for f in trimmed_files_pc5 + trimmed_files_dsrc:
-        os.remove(f)
-
-    if not args.data:
-        args.data = RAW
+    args.data = out
 
 
 def stage_match(args) -> None:
@@ -205,8 +155,9 @@ def stage_match(args) -> None:
         print("-- Skipping matching (no --data or --skip_matching)")
         return
 
-    required = ["matched_5g.csv", "matched_dsrc.csv",
-                 "matched_pc5.csv", "super.csv"]
+    required = ["matched_5g.csv", "super.csv"] + [
+        f"matched_{rat}.csv" for rat in args.rats if rat != "5g"
+    ]
     all_present = all(
         Path(args.data, f).is_file() for f in required
     )
@@ -214,7 +165,7 @@ def stage_match(args) -> None:
     if not all_present:
         banner("Stage 2: Matching cross-RAT data by GPS")
         from scripts.prepare_data import match_data
-        match_data(args.data)
+        match_data(args.data, rats=args.rats)
     else:
         print(f"-- All matched CSVs present in {args.data}, skipping matching")
 
@@ -227,9 +178,8 @@ def stage_train(args) -> None:
 
     banner(f"Stage 3: Training models ({args.model} for: {' '.join(args.rats)})")
 
-    from learning.main import load_csv_data, prepare_data, train_single_model
-    from learning.model import automatic_train, rmse
-    from keras.models import load_model
+    from learning.main import load_csv_data, prepare_data, train_single_model_torch
+    from learning.model import automatic_train_torch, load_torch_model
     from config import (
         TIMESTEPS, EPOCHS, PDR_WINDOW, FEATURES_COUNT,
         get_tx_interval_ms, MODEL_DIR, OUTPUT_DIR,
@@ -273,6 +223,9 @@ def stage_train(args) -> None:
         files = []
         if data_path:
             files = find_files_with_string(data_path, f"trim_{rat}")
+            if not files and not data_npz:
+                print(f"  Warning: no trim_{rat} files in {data_path}, skipping {rat}")
+                continue
         new_file = None
         if args.new_data:
             if not os.path.exists(args.new_data):
@@ -323,28 +276,27 @@ def stage_train(args) -> None:
                 raise ValueError(f"Model file '{model_path}' does not match type '{MODEL_TYPE}'")
 
             print(f"Loading existing {MODEL_TYPE} model for {rat}...")
-            loaded_path = get_latest_model(MODEL_TYPE, rat)
-            model = load_model(loaded_path, custom_objects={'rmse': rmse})
-            print(f"{MODEL_TYPE.upper()} model loaded: {loaded_path}")
+            model = load_torch_model(model_path)
+            print(f"{MODEL_TYPE.upper()} model loaded: {model_path}")
         else:
             if not do_load:
                 print(f"No model specified, building new {MODEL_TYPE} model...")
             elif not model_path or not os.path.exists(model_path):
                 print(f"No existing model found, building new {MODEL_TYPE} model...")
 
-            model, history = train_single_model(
+            model, history = train_single_model_torch(
                 MODEL_TYPE, TIMESTEPS, FEATURES, X_train, y_train_dict, rat, epochs)
 
             with open(os.path.join(OUTPUT_DIR, f"{MODEL_TYPE}_{rat}_training_history.json"), "w") as f:
-                json.dump(history.history, f)
+                json.dump(history, f)
 
         # Incremental learning
         if X_new_data is not None:
             print("=" * 60)
             print(f"Starting automatic incremental retraining for {MODEL_TYPE}...")
             print("=" * 60)
-            automatic_train(model, X_new_data, y_new_data, 32, 500, 0.15,
-                            os.path.join(OUTPUT_DIR, f"prediction_log_{MODEL_TYPE}_{rat}.csv"), rat, MODEL_TYPE)
+            automatic_train_torch(model, X_new_data, y_new_data, 32, 500, 0.15,
+                                  os.path.join(OUTPUT_DIR, f"prediction_log_{MODEL_TYPE}_{rat}.csv"), rat, MODEL_TYPE)
         else:
             print("No new data provided. Skipping incremental retraining.")
 
@@ -361,31 +313,30 @@ def stage_selection(args) -> None:
 
     from selection.rat_selection import (merge_csvs, get_predictions,
                                          select_best_rat, opportunistic_best_rat)
-    from learning.model import rmse
-    from keras.models import load_model
-    from config import RATS, MODELS
+    from learning.model import load_torch_model
+    from config import MODELS
     from utils import get_latest_model
 
     INPUT = args.data
     MODEL_TYPE = args.model
     model_types = MODELS if MODEL_TYPE == "all" else [MODEL_TYPE]
 
-    print(f"_ Processing all input CSVs with model type(s): {model_types}")
+    print(f"_ Processing all input CSVs with model type(s): {model_types}, RATs: {list(args.rats)}")
 
     # Build super_merged from matched CSVs
     print("_ Merging into the super-CSV.")
-    super_df = merge_csvs(INPUT)
+    super_df = merge_csvs(INPUT, rats=args.rats)
 
     # Predict directly on super_merged GPS — no intermediate files
     gps_data = super_df[["tx_latitude", "tx_longitude"]].copy()
 
     for mt in model_types:
-        for rat in RATS:
+        for rat in args.rats:
             model_path = get_latest_model(mt, rat)
             if model_path is None:
                 print(f"  Warning: no {mt} model found for {rat}, skipping")
                 continue
-            model_f = load_model(model_path, custom_objects={'rmse': rmse})
+            model_f = load_torch_model(model_path)
             latency, pdr = get_predictions(model_f, rat, gps_data)
             super_df[f"pred_latency_ms_{rat}_{mt}"] = latency
             super_df[f"pred_pdr_{rat}_{mt}"] = pdr
@@ -394,9 +345,9 @@ def stage_selection(args) -> None:
     print("_ Predictions added.")
     print("_ Sending to the selection algorithm.")
     for mt in model_types:
-        super_df[f"Best_RAT_{mt}"] = super_df.apply(select_best_rat, args=(mt,), axis=1)
+        super_df[f"Best_RAT_{mt}"] = super_df.apply(select_best_rat, args=(mt, args.rats), axis=1)
     print("_ Adding opportunistic algorithm.")
-    super_df = opportunistic_best_rat(super_df)
+    super_df = opportunistic_best_rat(super_df, rats=args.rats)
     print("_ Algorithms done.")
     out_path = os.path.join(INPUT, "bestRAT_super.csv")
     print(f"_ Saving. {out_path}")
@@ -429,6 +380,7 @@ def stage_feedback(args, merged_csv: str) -> None:
             sim_tx_interval_ms=args.tx_interval,
             enable_dtmc=not args.no_dtmc,
             enable_pqos=not args.no_pqos,
+            rats=args.rats,
         )
     else:
         banner("Stage 5: Feedback loop (single vehicle)")
@@ -443,6 +395,7 @@ def stage_feedback(args, merged_csv: str) -> None:
             sim_tx_interval_ms=args.tx_interval,
             enable_dtmc=not args.no_dtmc,
             enable_pqos=not args.no_pqos,
+            rats=args.rats,
         )
 
 
@@ -454,7 +407,7 @@ def main(argv=None) -> None:
 
     # Create timestamped run directory under output/
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"run_{run_stamp}_{args.model}"
+    run_name = f"run_{run_stamp}_{args.model}_{'-'.join(args.rats)}"
     if not args.skip_feedback: #and args.num_vehicles > 1:
         run_name += f"_{args.num_vehicles}v"
     run_dir = os.path.join("output", run_name)

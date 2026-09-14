@@ -68,24 +68,43 @@ The rest of this document describes each stage in detail, which is useful both f
 
 ## Stage 1: Trim Raw Logs
 
-Raw vehicular network logs (5G, PC5, DSRC) contain noisy measurements with clock drift and inconsistent formats. The trimmer standardizes them.
+Raw logs are trimmed exactly like the cohda project, so both projects share the same raw datasets and the same `df_*.json` outputs (pandas split-orient JSON). Trimming has two steps.
+
+**1. Ingest raw logs into `df_*.json`** (port of cohda's `ingest_json-new.ipynb`):
 
 ```bash
-python -m scripts.trimmers --folder /path/to/raw_logs
+python -m scripts.ingest_logs --input /path/to/raw_dataset --output /path/to/trimmed
 ```
 
-**What it does:**
+| Raw input | Output | Content |
+|---|---|---|
+| `datalake._5G_UE.json` | `df_radio.json` | 5G radio metrics per UE (`pusch_snr`, `ul_path_loss`, `dl_mcs`, ...) |
+| `datalake._5G_RUTX_iperf.json` | `df_iperf.json` | iperf intervals |
+| `CAM_*.jsonl` | `df_rtk.json` | RTK positions from CAM messages (local time) |
+| `datalake._5G_RUTX_ping.json` | `df_ping.json` | 5G ping latency, RTK position, `packet_loss` |
+| `logs_pc5_<rsu>_*.log` | `df_pc5.json` | PC5 packets per RSU (`Id`), RTK position |
 
-- Finds files matching `5g`, `pc5`, `dsrc` patterns in the folder
-- **5G**: two-pass -- first computes clock drift coefficient via linear regression on latency vs. sequence number, then compensates and rescales latency to 16-45 ms
-- **PC5**: extracts latency, seq num, timestamp, GPS from fixed field positions
-- **DSRC**: extracts RSRP values; GPS is matched from PC5/5G data (exact timestamp, then +/-1s window)
+- All outputs use local time (UTC+1). CAM and PC5 epochs are UTC and are shifted by one hour; datalake `$date` values are already local time and are kept as is.
+- Ping and PC5 rows take the position of the nearest RTK sample within 9 s.
+- A folder of tour subfolders (`Tour1/`, `Tour2/`, ...) is ingested per tour, then merged into top-level files.
+- Differences from cohda's notebook: `df_ping.json` has an extra `packet_loss` column; ping and PC5 positions are matched per row on each record's own time (the notebook shifted some pings by ±1 h and mixed up PC5 rows of different RSUs); DSRC logs are not ingested.
 
-**Outputs:** `trim_5g.csv`, `trim_pc5.csv`, `trim_dsrc.csv` with standardized columns:
+**2. Convert to trimmed CSVs:**
+
+```bash
+python -m scripts.convert_json_to_trim --input /path/to/trimmed
+```
+
+- **5G**: latency from pings, clipped to the 5G latency bound (1000 ms; slower pings are multi-second stalls), `pdr = 1 - packet_loss`, `sinr = pusch_snr` and `rsrp = -ul_path_loss` joined from `df_radio.json` (same UE IP, nearest sample within 2 s)
+- **PC5**: latency, sequence number and TX timestamp from the raw log, position from RTK
+
+**Outputs:** `trim_5g.csv`, `trim_pc5.csv` with standardized columns:
 
 ```
-tx_seq_num, tx_timestamp_ms, tx_latitude, tx_longitude, latency_ms, [sinr, rsrp, rsrp_1, rsrp_2]
+tx_seq_num, tx_timestamp_ms, tx_latitude, tx_longitude, latency_ms, [sinr, rsrp, pdr]
 ```
+
+`run_pipeline --raw_data` runs both steps, writing to `--data` (default: `<raw_data>/trimmed`). The older Saturne log trimmer is still available as `python -m scripts.trimmers --folder /path/to/raw_logs`.
 
 ---
 
@@ -106,7 +125,9 @@ python -m scripts.prepare_data --input /path/to/trimmed_data
 
 **Outputs:**
 
-- `matched_5g.csv`, `matched_pc5.csv`, `matched_dsrc.csv` -- aligned by GPS
+- `matched_5g.csv`, `matched_pc5.csv`, `matched_dsrc.csv` -- aligned by GPS (`matched_dsrc.csv` only when DSRC is in `--rats`)
+
+> **RAT set.** `--rats` (default `pc5 5g`, i.e. no DSRC, matching the DRL agent's action space) applies to every stage: matching, training, selection (`select_best_rat`, `opportunistic_best_rat`, `RATSelectionAPI(rats=...)`) and the feedback loops. RATs outside the set are never loaded or selected, even if their models exist in `models/`. Run directories are tagged with the set, e.g. `run_<stamp>_lstm_pc5-5g_20v`.
 - `super.csv` -- combined reference with `tx_latitude, tx_longitude, latency_ms_5g, pdr_5g`
 
 ---
@@ -157,7 +178,7 @@ python -m learning.main --rat dsrc --model lstm --data /path/to/matched_data
 
 ### Outputs
 
-- `models/{lstm|gru|rnn}_{5g|pc5|dsrc}_{timestamp}.keras`
+- `models/{lstm|gru|rnn}_{5g|pc5|dsrc}_{timestamp}.pt`
 - `{model}_{rat}_training_log.csv` (per-epoch losses)
 - `{model}_{rat}_training_history.json`
 - `{rat}_lstm_data.npz`
@@ -194,7 +215,7 @@ state = NetworkState(
 )
 
 decision = api.select_rat(state)
-print(decision.selected_rat)          # e.g., RATType.DSRC
+print(decision.selected_rat)          # e.g., RATType.PC5 (DSRC only with rats=ALL_RATS)
 print(decision.predicted_latency_ms)  # e.g., 11.3
 print(decision.predicted_pdr)         # e.g., 0.993
 print(decision.all_predictions)       # predictions for all 3 RATs
@@ -317,13 +338,13 @@ python -m learning.main --rat 5g --model lstm \
   --new_data /path/to/new_field_data
 ```
 
-**What `automatic_train` does:**
+**What `automatic_train_torch` does:**
 
 1. Splits new data: 85% training, 15% validation
 2. Streams through training data in chunks of N=500
 3. For each chunk: batch predict, compute MAE + squared error, retrain 1 epoch
 4. Logs predictions to `prediction_log_{model}_{rat}.csv`
-5. Saves retrained model as `models/retrained_{model}_{rat}_{timestamp}.keras`
+5. Saves retrained model as `models/retrained_{model}_{rat}_{timestamp}.pt`
 
 ---
 

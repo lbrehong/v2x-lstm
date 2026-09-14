@@ -21,12 +21,15 @@ import random
 import pytest
 import numpy as np
 import pandas as pd
+import copy
 from unittest.mock import Mock, patch, MagicMock, PropertyMock
+
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api_types import RATType, NetworkState, RATDecision, QueueContext, PacketSizeDecision
-from config import TIMESTEPS
+from config import TIMESTEPS, ALL_RATS
 
 
 # ---------------------------------------------------------------------------
@@ -306,109 +309,94 @@ class TestSimulateTx:
 class TestRetrainModel:
     """Tests for _retrain_model helper."""
 
-    def _make_retrain_mock(self, rat, n_samples, n_features, model_type="lstm",
-                           eval_return=None):
-        """Build mock model + api with all fields needed by _retrain_model."""
+    def _make_retrain_setup(self, rat, n_samples, n_features, model_type="lstm"):
+        """Build a real small PyTorch model + mock api with all fields needed by _retrain_model."""
         from config import create_latency_scaler
+        from learning.model import build_model_torch
 
-        eval_return = eval_return or [0.05, 0.02, 0.03, 0.01, 0.01]
-        mock_model = Mock()
-        mock_model.evaluate.return_value = eval_return
-        mock_history = Mock()
-        mock_history.history = {
-            "loss": [0.04],
-            "latency_ms_loss": [0.015],
-            "pdr_loss": [0.025],
-            "latency_ms_rmse": [0.008],
-            "pdr_rmse": [0.009],
-            "val_loss": [0.06],
-            "val_latency_ms_loss": [0.025],
-            "val_pdr_loss": [0.035],
-            "val_latency_ms_rmse": [0.012],
-            "val_pdr_rmse": [0.015],
-        }
-        mock_model.fit.return_value = mock_history
-        mock_model.save = Mock()
-        mock_model.optimizer = Mock()
-        mock_model.optimizer.learning_rate = 0.001
-        mock_model.predict.return_value = [
-            np.full((n_samples, 1), 0.1, dtype=np.float32),
-            np.full((n_samples, 1), 0.8, dtype=np.float32),
-        ]
+        torch.manual_seed(0)
+        model = build_model_torch(model_type, TIMESTEPS, n_features)
 
         mock_api = Mock()
-        mock_api.models = {rat: mock_model}
+        mock_api.models = {rat: model}
         mock_api.model_type = model_type
         mock_api.latency_scaler = create_latency_scaler()
 
-        x = np.random.rand(n_samples, TIMESTEPS, n_features).astype(np.float32)
-        y_lat = np.random.rand(n_samples).astype(np.float32)
-        y_pdr = np.random.rand(n_samples).astype(np.float32)
-        return mock_api, mock_model, x, y_lat, y_pdr
+        rng = np.random.default_rng(0)
+        x = rng.random((n_samples, TIMESTEPS, n_features)).astype(np.float32)
+        y_lat = rng.random(n_samples).astype(np.float32)
+        y_pdr = rng.random(n_samples).astype(np.float32)
+        return mock_api, model, x, y_lat, y_pdr
 
     def test_retrain_appends_to_log(self):
         """_retrain_model should append one entry to retrain_log with all metrics."""
         from scripts.feedback_loop import _retrain_model
 
-        mock_api, _, x, y_lat, y_pdr = self._make_retrain_mock("pc5", 10, 4)
+        mock_api, _, x, y_lat, y_pdr = self._make_retrain_setup("pc5", 40, 4)
         retrain_log = []
 
-        with patch("scripts.feedback_loop.MODEL_DIR", "/tmp/test_models"):
-            _retrain_model(mock_api, "pc5", x, y_lat, y_pdr, cycle=1, retrain_log=retrain_log)
+        _retrain_model(mock_api, "pc5", x, y_lat, y_pdr, cycle=1, retrain_log=retrain_log)
 
         assert len(retrain_log) == 1
         entry = retrain_log[0]
         assert entry["cycle"] == 1
         assert entry["rat"] == "pc5"
-        assert entry["n_samples"] == 10
-        assert entry["loss_before"] == pytest.approx(0.05)
-        assert entry["loss_after"] == pytest.approx(0.04)
-        assert "pdr_mae" in entry
+        assert entry["n_samples"] == 40
         # Timing and learning rate
         assert entry["train_time_s"] >= 0
         assert entry["learning_rate"] == pytest.approx(0.001)
-        # Per-head before metrics
-        assert entry["latency_loss_before"] == pytest.approx(0.02)
-        assert entry["pdr_loss_before"] == pytest.approx(0.03)
-        assert entry["latency_rmse_before"] == pytest.approx(0.01)
-        assert entry["pdr_rmse_before"] == pytest.approx(0.01)
-        # Per-head after metrics
-        assert entry["latency_loss_after"] == pytest.approx(0.015)
-        assert entry["pdr_loss_after"] == pytest.approx(0.025)
-        # Validation metrics
-        assert entry["val_loss"] == pytest.approx(0.06)
-        assert entry["val_latency_loss"] == pytest.approx(0.025)
-        assert entry["val_pdr_loss"] == pytest.approx(0.035)
-        # Prediction accuracy snapshot
-        assert entry["latency_mae_ms"] >= 0
-        assert entry["pdr_mae"] >= 0
+        # Before, after, validation and real-unit accuracy metrics are all populated
+        metric_keys = [
+            "loss_before", "latency_loss_before", "pdr_loss_before",
+            "latency_rmse_before", "pdr_rmse_before",
+            "loss_after", "latency_loss_after", "pdr_loss_after",
+            "latency_rmse_after", "pdr_rmse_after",
+            "val_loss", "val_latency_loss", "val_pdr_loss",
+            "val_latency_rmse", "val_pdr_rmse",
+            "latency_mae_ms", "pdr_mae",
+        ]
+        for key in metric_keys:
+            assert np.isfinite(entry[key]) and entry[key] >= 0, key
+        # Total losses are the 1.0/1.5 weighted sum of the per-head losses
+        assert entry["loss_before"] == pytest.approx(
+            entry["latency_loss_before"] + 1.5 * entry["pdr_loss_before"])
+        assert entry["val_loss"] == pytest.approx(
+            entry["val_latency_loss"] + 1.5 * entry["val_pdr_loss"])
 
-    def test_retrain_calls_fit_not_save(self):
-        """_retrain_model should call model.fit but not save (save happens at end of loop)."""
+    def test_retrain_updates_weights_but_does_not_save(self):
+        """_retrain_model should train in place but not save (save happens at end of loop)."""
         from scripts.feedback_loop import _retrain_model
 
-        mock_api, mock_model, x, y_lat, y_pdr = self._make_retrain_mock(
-            "dsrc", 5, 6, model_type="gru")
-
-        _retrain_model(mock_api, "dsrc", x, y_lat, y_pdr, cycle=2, retrain_log=[])
-
-        mock_model.fit.assert_called_once()
-        mock_model.save.assert_not_called()
-
-    def test_retrain_evaluate_scalar(self):
-        """_retrain_model should handle evaluate returning a scalar."""
-        from scripts.feedback_loop import _retrain_model
-
-        mock_api, _, x, y_lat, y_pdr = self._make_retrain_mock(
-            "5g", 3, 6, eval_return=0.07)  # scalar, not list
+        mock_api, model, x, y_lat, y_pdr = self._make_retrain_setup(
+            "dsrc", 40, 6, model_type="gru")
+        weights_before = copy.deepcopy(model.state_dict())
         retrain_log = []
 
-        with patch("scripts.feedback_loop.MODEL_DIR", "/tmp/test_models"):
+        with patch("scripts.feedback_loop.save_torch_model") as mock_save:
+            _retrain_model(mock_api, "dsrc", x, y_lat, y_pdr, cycle=2, retrain_log=retrain_log)
+
+        mock_save.assert_not_called()
+        assert retrain_log[0]["rolled_back"] is False
+        assert any(not torch.equal(param, weights_before[name])
+                   for name, param in model.state_dict().items())
+
+    def test_retrain_rolls_back_on_loss_spike(self):
+        """A >2x loss increase after retraining should restore the pre-retrain weights."""
+        from scripts.feedback_loop import _retrain_model
+
+        mock_api, model, x, y_lat, y_pdr = self._make_retrain_setup("5g", 40, 6)
+        weights_before = copy.deepcopy(model.state_dict())
+        head_metrics = {"latency_ms_loss": 0.01, "pdr_loss": 0.01,
+                        "latency_ms_rmse": 0.1, "pdr_rmse": 0.1}
+        retrain_log = []
+
+        with patch("scripts.feedback_loop.evaluate_torch",
+                   side_effect=[{**head_metrics, "loss": 0.05}, {**head_metrics, "loss": 0.5}]):
             _retrain_model(mock_api, "5g", x, y_lat, y_pdr, cycle=1, retrain_log=retrain_log)
 
-        assert retrain_log[0]["loss_before"] == pytest.approx(0.07)
-        # Per-head before metrics should be None for scalar evaluate
-        assert retrain_log[0]["latency_loss_before"] is None
+        assert retrain_log[0]["rolled_back"] is True
+        for name, param in model.state_dict().items():
+            assert torch.equal(param, weights_before[name])
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +407,7 @@ class TestRunFeedbackLoop:
     """Integration tests for run_feedback_loop with mocked components."""
 
     def _make_mock_model(self, n_features):
-        """Create a mock Keras model for a given feature count."""
+        """Create a placeholder model (never called: retraining is not triggered) for a given feature count."""
         mock_model = Mock()
         # predict returns [latency_array, pdr_array]
         mock_model.predict.return_value = [
@@ -803,6 +791,7 @@ class TestRunFeedbackLoop:
                 model_type="lstm",
                 seed=42,
                 retrain_interval=9999,
+                rats=ALL_RATS,
             )
 
         # 25 rows, alternating DSRC/PC5 -> 24 switches
@@ -1333,12 +1322,13 @@ class TestRunMultiVehicleLoop:
 
         ct_df = pd.read_csv(os.path.join(output_dir, "feedback_multi_contention.csv"))
         assert len(ct_df) == 25
-        assert "n_dsrc" in ct_df.columns
         assert "n_pc5" in ct_df.columns
         assert "n_5g" in ct_df.columns
-        assert "utilization_dsrc" in ct_df.columns
         assert "utilization_pc5" in ct_df.columns
         assert "utilization_5g" in ct_df.columns
+        # DSRC is excluded from the default RAT set
+        assert "n_dsrc" not in ct_df.columns
+        assert "utilization_dsrc" not in ct_df.columns
 
     def test_seed_deterministic(self, super_merged_csv, tmp_path):
         """Same seed should produce same results."""

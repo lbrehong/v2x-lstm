@@ -15,8 +15,14 @@ import numpy as np
 import pytest
 import torch
 
+pytest.skip(
+    "Legacy TF-vs-PyTorch transplant tests: TensorFlow and the Keras build_model "
+    "were removed from the project",
+    allow_module_level=True,
+)
+
 from learning.weight_transfer import build_tf_model_with_seed, transplant, weight_rel_error
-from learning.model_torch import build_model_torch
+from learning.model import build_model_torch
 
 
 @pytest.mark.parametrize("model_type", ["lstm", "gru", "rnn"])

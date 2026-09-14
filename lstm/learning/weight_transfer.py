@@ -1,4 +1,11 @@
-"Ce code transfère les poids du modèle TensorFlow vers le modèle PyTorch afin de garantir que les deux modèles commencent avec les mêmes poids et le même état initial. "
+"""
+Ce code transfère les poids du modèle TensorFlow vers le modèle PyTorch afin de garantir que les deux modèles commencent avec les mêmes poids et le même état initial.
+
+Legacy: only used by the historical TF-vs-PyTorch comparison (validation/).
+It needs TensorFlow, which is no longer a project dependency, and
+build_tf_model_with_seed relies on the Keras build_model that was removed
+from learning.model, so it does not run as-is.
+"""
 import numpy as np
 import torch
 

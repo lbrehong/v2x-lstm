@@ -38,7 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 MODEL="lstm"
-RATS="5g pc5 dsrc"
+RATS="5g pc5"                # RATs involved in every stage (DSRC excluded by default)
 SEED=""
 NUM_VEHICLES=1
 RETRAIN_INTERVAL=500
@@ -73,9 +73,9 @@ Data sources (at least one required):
 
 Model options:
   --model TYPE          Model architecture: lstm, gru, rnn (default: lstm)
-  --rats "r1 r2 ..."    RATs to train: "5g pc5 dsrc" (default: all three)
+  --rats "r1 r2 ..."    RATs involved in all stages, among 5g pc5 dsrc (default: "5g pc5")
   --load MODE           Model loading: "none" = train fresh, "existing" = latest,
-                        or a path to a specific .keras file (default: auto-detect)
+                        or a path to a specific .pt file (default: auto-detect)
   --epochs N            Training epochs (default: 100)
 
 Feedback loop options:
@@ -130,6 +130,8 @@ if [[ -z "$RAW_DATA" && -z "$DATA" && -z "$NPZ" && -z "$MERGED_CSV" ]]; then
     exit 1
 fi
 
+read -r -a RATS_ARR <<< "$RATS"
+
 cd "$PROJECT_DIR"
 
 banner() {
@@ -156,16 +158,16 @@ fi
 if [[ -n "$DATA" ]] && [[ "$SKIP_MATCHING" == false ]]; then
     # Only run matching if ALL required matched files exist
     all_matched=true
-    for f in matched_5g.csv matched_dsrc.csv matched_pc5.csv super.csv; do
-        if [[ ! -f "$DATA/$f" ]]; then
-            all_matched=false
-            break
-        fi
+    for f in super.csv matched_5g.csv; do
+        [[ -f "$DATA/$f" ]] || all_matched=false
+    done
+    for rat in "${RATS_ARR[@]}"; do
+        [[ "$rat" == "5g" || -f "$DATA/matched_$rat.csv" ]] || all_matched=false
     done
 
     if [[ "$all_matched" == false ]]; then
         banner "Stage 2: Matching cross-RAT data by GPS"
-        python -m scripts.prepare_data --input "$DATA"
+        python -m scripts.prepare_data --input "$DATA" --rats "${RATS_ARR[@]}"
     else
         echo "-- All matched CSVs present in $DATA, skipping matching"
     fi
@@ -177,7 +179,7 @@ fi
 if [[ "$SKIP_TRAINING" == false ]]; then
     banner "Stage 3: Training models ($MODEL for: $RATS)"
 
-    for rat in $RATS; do
+    for rat in "${RATS_ARR[@]}"; do
         echo "---- Training $MODEL for $rat ----"
 
         CMD=(python -m learning.main --rat "$rat" --model "$MODEL")
@@ -222,7 +224,7 @@ fi
 # ── Stage 4: RAT selection + super CSV ──────────────────────────────────────
 if [[ "$SKIP_SELECTION" == false ]] && [[ -n "$DATA" ]]; then
     banner "Stage 4: RAT selection on matched data"
-    python -m selection.rat_selection --input "$DATA" --model_type "$MODEL"
+    python -m selection.rat_selection --input "$DATA" --model_type "$MODEL" --rats "${RATS_ARR[@]}"
 else
     echo "-- Skipping selection (--skip_selection or no --data)"
 fi
@@ -253,6 +255,7 @@ if [[ "$SKIP_FEEDBACK" == false ]]; then
             --base_packet_size "$BASE_PACKET_SIZE"
             --correction_exponent "$CORRECTION_EXP"
             --num_vehicles "$NUM_VEHICLES"
+            --rats "${RATS_ARR[@]}"
         )
         [[ -n "$SEED" ]] && CMD+=(--seed "$SEED")
 

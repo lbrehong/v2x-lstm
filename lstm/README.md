@@ -34,13 +34,13 @@ The predictions enable proactive RAT selection, allowing vehicles to switch to t
 Install required packages:
 
 ```bash
-pip install tensorflow pandas numpy scikit-learn matplotlib tqdm folium scipy tabulate python-dotenv simpy
+pip install torch pandas numpy scikit-learn matplotlib tqdm folium scipy tabulate python-dotenv simpy
 ```
 
-For CPU-only TensorFlow (recommended for most setups):
+For a smaller CPU-only PyTorch build on Linux:
 
 ```bash
-pip install tensorflow-cpu
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
 ### Clone and Setup
@@ -78,7 +78,9 @@ lstm/
 |
 |-- scripts/                       # Data prep & visualization CLI tools
 |   |-- feedback_loop.py           # Feedback loop with incremental retraining
-|   |-- trimmers.py                # Raw V2X/5G log processing, latency drift compensation
+|   |-- ingest_logs.py             # Raw logs -> cohda-compatible df_*.json (ping, PC5, RTK, radio, iperf)
+|   |-- convert_json_to_trim.py    # df_*.json -> trim_*.csv (5G radio join, packet-loss PDR)
+|   |-- trimmers.py                # Older Saturne log format trimmer (drift compensation)
 |   |-- prepare_data.py            # Cross-RAT data matching by GPS coordinates
 |   `-- plot_history.py            # Training history visualization
 |
@@ -87,7 +89,7 @@ lstm/
 |   `-- linaer.py                  # One-off drift compensation script
 |
 |-- tests/                         # Unit tests for all modules
-|-- models/                        # Saved Keras models (.keras files)
+|-- models/                        # Saved PyTorch models (.pt files)
 |-- output/                        # Prediction logs, training logs, visualizations
 `-- CLAUDE.md                      # AI assistant guidelines
 ```
@@ -135,7 +137,7 @@ python -m run_pipeline --data /path/to/trimmed_logs \
 | `--npz` | Preprocessed NPZ archive (skips CSV processing) |
 | `--new_data` | New data folder for incremental learning |
 | `--model` | Architecture: `lstm`, `gru`, or `rnn` (default: `lstm`) |
-| `--rats` | RATs to train (default: `5g pc5 dsrc`) |
+| `--rats` | RATs involved in every stage: matching, training, selection, feedback (default: `pc5 5g`, matching the DRL agent in `../cohda/learning`; add `dsrc` to include DSRC) |
 | `--num_vehicles` | Number of vehicles for feedback loop (default: 1) |
 | `--seed` | Random seed for reproducibility |
 | `--skip_trimming` | Skip the trimming stage |
@@ -152,13 +154,14 @@ The stages below can also be run independently. See `doc/PIPELINE.md` for detail
 
 #### Step 1: Trim Raw Logs
 
-Process raw V2X and 5G log files into standardized CSVs:
+Ingest raw logs into the same `df_*.json` files as the cohda project, then convert them into standardized CSVs:
 
 ```bash
-python -m scripts.trimmers --folder /path/to/raw_logs
+python -m scripts.ingest_logs --input /path/to/raw_dataset --output /path/to/trimmed
+python -m scripts.convert_json_to_trim --input /path/to/trimmed
 ```
 
-This generates `trim_5g.csv`, `trim_pc5.csv`, and `trim_dsrc.csv`.
+This generates `df_{radio,iperf,rtk,ping,pc5}.json`, then `trim_5g.csv` and `trim_pc5.csv`. See `doc/PIPELINE.md` for the expected raw files and the matching rules.
 
 #### Step 2: Match Cross-RAT Data
 
@@ -168,7 +171,7 @@ Align data from different RATs by GPS coordinates:
 python -m scripts.prepare_data --input /path/to/trimmed_data
 ```
 
-Outputs `matched_5g.csv`, `matched_pc5.csv`, `matched_dsrc.csv`, and `super.csv`.
+Outputs `matched_5g.csv`, `matched_pc5.csv`, `matched_dsrc.csv` (only with `--rats ... dsrc` and when DSRC data exists), and `super.csv`.
 
 ### Model Training
 
@@ -304,8 +307,8 @@ Dense (32 units, ReLU activation)
 
 ### Models
 
-- Initial: `models/{lstm|gru|rnn}_{5g|pc5|dsrc}_{timestamp}.keras`
-- Retrained: `models/retrained_{model}_{rat}_{timestamp}.keras`
+- Initial: `models/{lstm|gru|rnn}_{5g|pc5|dsrc}_{timestamp}.pt`
+- Retrained: `models/retrained_{model}_{rat}_{timestamp}.pt`
 
 ### Training Logs
 
@@ -341,10 +344,13 @@ The opportunistic (baseline) algorithm uses current measurements with sticky swi
 ## Data Pipeline
 
 ```
-Raw Logs (5G, PC5, DSRC)
+Raw Logs (5G datalake, PC5, CAM/RTK)
          |
          v
-scripts/trimmers.py     -->  Trimmed CSVs (drift-compensated, GPS-enriched)
+scripts/ingest_logs.py  -->  df_*.json (same files as cohda, RTK positions)
+         |
+         v
+scripts/convert_json_to_trim.py -->  Trimmed CSVs (5G radio metrics, packet-loss PDR)
          |
          v
 scripts/prepare_data.py -->  Matched CSVs (aligned by GPS)

@@ -22,12 +22,16 @@ import pandas as pd
 import numpy as np
 import argparse
 
-from config import get_tx_interval_ms, PDR_WINDOW
+from config import get_tx_interval_ms, PDR_WINDOW, ALL_RATS, DEFAULT_RATS, validate_rats
 from learning.data_preprocessing import compute_pdr_rolling
 
 # Default input file configuration
 PRIMARY = "trim_5g.csv"  # Reference RAT for GPS coordinates
-CSV = ["trim_dsrc.csv", "trim_pc5.csv"]  # Secondary RATs to match
+
+
+def secondary_csvs(rats=DEFAULT_RATS):
+    """Trimmed CSV filenames of the secondary (non-5G) RATs in `rats`."""
+    return [f"trim_{rat}.csv" for rat in validate_rats(rats) if rat != "5g"]
 
 # GPS matching tolerance (approximately 1 meter at mid-latitudes)
 TOLERANCE = 0.00001
@@ -40,9 +44,9 @@ def _output_name(filename):
     return filename
 
 
-def match_data(input_dir, primary=None, secondary=None):
+def match_data(input_dir, primary=None, secondary=None, rats=DEFAULT_RATS):
     """
-    Match primary 5G data with secondary DSRC/PC5 data by GPS location.
+    Match primary 5G data with secondary RAT data (PC5, optionally DSRC) by GPS location.
 
     Creates aligned datasets where each row represents the same physical
     location across all RATs, enabling direct QoS comparison.
@@ -56,20 +60,22 @@ def match_data(input_dir, primary=None, secondary=None):
     Args:
         input_dir: Directory containing trimmed CSV files
         primary: Primary CSV filename (default: "5g.csv")
-        secondary: List of secondary CSV filenames (default: ["dsrc.csv", "pc5.csv"])
+        secondary: List of secondary CSV filenames (default: derived from `rats`)
+        rats: RATs involved; used when `secondary` is None (default: DEFAULT_RATS)
 
     Outputs:
         - matched_5g.csv: Deduplicated 5G data
-        - matched_dsrc.csv: DSRC data matched to 5G locations
-        - matched_pc5.csv: PC5 data matched to 5G locations
+        - matched_<rat>.csv: Secondary RAT data matched to 5G locations
         - super.csv: Combined reference with 5G latency/PDR
     """
     primary = primary or PRIMARY
-    secondary = secondary or CSV
+    secondary = secondary or secondary_csvs(rats)
 
     # Load primary CSV
     primary_df = pd.read_csv(os.path.join(input_dir, primary))
-    compute_pdr_rolling(primary_df, "tx_timestamp_ms", PDR_WINDOW, get_tx_interval_ms("5g"))
+    # Keep PDR already provided by the trimmed data (e.g. 5G ping packet loss)
+    if "pdr" not in primary_df.columns:
+        compute_pdr_rolling(primary_df, "tx_timestamp_ms", PDR_WINDOW, get_tx_interval_ms("5g"))
 
     # Remove duplicates while keeping the lowest latency but preserving the original order
     primary_df = primary_df[primary_df["latency_ms"] > 15.999]  # Remove outliers
@@ -93,11 +99,16 @@ def match_data(input_dir, primary=None, secondary=None):
     super_csv.to_csv(os.path.join(input_dir, "super.csv"), index=False)
 
     for csvs in secondary:
+        secondary_path = os.path.join(input_dir, csvs)
+        if not os.path.exists(secondary_path):
+            print(f"Skipping {csvs}: not found in {input_dir}")
+            continue
         print("___________________")
         print("Processing", csvs)
-        secondary_df = pd.read_csv(os.path.join(input_dir, csvs))
+        secondary_df = pd.read_csv(secondary_path)
         rat_key = _output_name(csvs).replace(".csv", "")  # e.g. "dsrc", "pc5"
-        compute_pdr_rolling(secondary_df, "tx_timestamp_ms", PDR_WINDOW, get_tx_interval_ms(rat_key))
+        if "pdr" not in secondary_df.columns:
+            compute_pdr_rolling(secondary_df, "tx_timestamp_ms", PDR_WINDOW, get_tx_interval_ms(rat_key))
         secondary_df = secondary_df[secondary_df["latency_ms"] < 300.001]
 
         # Filter RSRP sentinel values (16383 = physically impossible, modem error)
@@ -171,7 +182,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Match cross-RAT data by GPS coordinates")
     parser.add_argument('--input', type=str, required=True, help="Path to the input directory")
     parser.add_argument('--primary', type=str, default=None, help="Primary CSV filename (default: trim_5g.csv)")
-    parser.add_argument('--secondary', type=str, nargs='+', default=None, help="Secondary CSV filenames (default: dsrc.csv pc5.csv)")
+    parser.add_argument('--secondary', type=str, nargs='+', default=None, help="Secondary CSV filenames (default: derived from --rats)")
+    parser.add_argument('--rats', nargs='+', default=list(DEFAULT_RATS), choices=ALL_RATS,
+                        help=f"RATs involved (default: {' '.join(DEFAULT_RATS)})")
     args = parser.parse_args()
 
-    match_data(args.input, primary=args.primary, secondary=args.secondary)
+    match_data(args.input, primary=args.primary, secondary=args.secondary, rats=args.rats)

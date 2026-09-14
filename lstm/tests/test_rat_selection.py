@@ -9,7 +9,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS
+from config import PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS, ALL_RATS
 
 
 class TestSelectBestRat:
@@ -195,6 +195,82 @@ class TestSelectBestRat:
         assert result == 'pc5'
 
 
+    def test_rat_without_columns_is_ignored(self):
+        """A RAT with no prediction/PDR columns (e.g. no DSRC data) is treated as unavailable."""
+        from selection.rat_selection import select_best_rat
+
+        row = pd.Series({
+            'pred_latency_ms_pc5_lstm': 10.0,
+            'pred_pdr_pc5_lstm': 0.995,
+            'pdr_pc5': 0.99,
+            'pred_latency_ms_5g_lstm': 20.0,
+            'pred_pdr_5g_lstm': 0.998,
+            'pdr_5g': 0.99,
+        })
+
+        assert select_best_rat(row, 'lstm') == 'pc5'
+
+    def test_default_rats_ignore_dsrc(self):
+        """With the default RAT set, DSRC is never selected even when it is the best."""
+        from selection.rat_selection import select_best_rat
+
+        row = pd.Series({
+            'pred_latency_ms_dsrc_lstm': 1.0,
+            'pred_pdr_dsrc_lstm': 1.0,
+            'pdr_dsrc': 1.0,
+            'pred_latency_ms_pc5_lstm': 10.0,
+            'pred_pdr_pc5_lstm': 0.995,
+            'pdr_pc5': 0.99,
+            'pred_latency_ms_5g_lstm': 20.0,
+            'pred_pdr_5g_lstm': 0.998,
+            'pdr_5g': 0.99,
+        })
+
+        assert select_best_rat(row, 'lstm') == 'pc5'
+        assert select_best_rat(row, 'lstm', ALL_RATS) == 'dsrc'
+
+
+class TestMergeCsvs:
+    """Tests for merging matched per-RAT CSVs into super_merged.csv."""
+
+    @staticmethod
+    def _write_inputs(tmp_path, with_dsrc=False):
+        coords = {'tx_latitude': [43.56, 43.57], 'tx_longitude': [1.466, 1.467]}
+        pd.DataFrame({**coords, 'latency_ms_5g': [30.0, 31.0], 'pdr_5g': [1.0, 0.8]}).to_csv(
+            tmp_path / 'super.csv', index=False)
+        pd.DataFrame({**coords, 'latency_ms': [30.0, 31.0], 'sinr': [10.0, 11.0],
+                      'rsrp': [-100.0, -101.0], 'pdr': [1.0, 0.8]}).to_csv(tmp_path / 'matched_5g.csv', index=False)
+        pd.DataFrame({**coords, 'latency_ms': [20.0, 21.0], 'pdr': [0.9, 0.95]}).to_csv(
+            tmp_path / 'matched_pc5.csv', index=False)
+        if with_dsrc:
+            pd.DataFrame({**coords, 'latency_ms': [5.0, 6.0], 'rsrp_1': [-80.0, -81.0],
+                          'rsrp_2': [-82.0, -83.0], 'pdr': [0.99, 0.98]}).to_csv(
+                tmp_path / 'matched_dsrc.csv', index=False)
+
+    def test_default_rats_skip_dsrc(self, tmp_path):
+        """By default, DSRC is not merged even if matched_dsrc.csv exists."""
+        from selection.rat_selection import merge_csvs
+
+        self._write_inputs(tmp_path, with_dsrc=True)
+        df = merge_csvs(str(tmp_path))
+
+        assert not any('dsrc' in col for col in df.columns)
+        assert 'rsrp_1' not in df.columns
+        assert df['latency_ms_pc5'].tolist() == [20.0, 21.0]
+
+    def test_missing_matched_dsrc_gives_nan_columns(self, tmp_path):
+        from selection.rat_selection import merge_csvs
+
+        self._write_inputs(tmp_path)
+        df = merge_csvs(str(tmp_path), rats=ALL_RATS)
+
+        assert df['latency_ms_dsrc'].isna().all()
+        assert df['pdr_dsrc'].isna().all()
+        assert df['latency_ms_pc5'].tolist() == [20.0, 21.0]
+        assert df['sinr'].tolist() == [10.0, 11.0]
+        assert (tmp_path / 'super_merged.csv').exists()
+
+
 class TestOpportunisticBestRat:
     """Tests for the opportunistic (reactive) RAT selection function."""
 
@@ -268,6 +344,25 @@ class TestOpportunisticBestRat:
         result = opportunistic_best_rat(df)
 
         assert result['Best_RAT_opp'].iloc[0] == 'NaN'
+
+    def test_opportunistic_default_rats_ignore_dsrc(self):
+        """Default RAT set never picks DSRC, and works without DSRC columns."""
+        from selection.rat_selection import opportunistic_best_rat
+
+        df = pd.DataFrame({
+            'latency_ms_dsrc': [1.0, 1.0],  # best latency, but DSRC is not selected
+            'pdr_dsrc': [1.0, 1.0],
+            'latency_ms_pc5': [10.0, 10.0],
+            'pdr_pc5': [0.9, 0.9],
+            'latency_ms_5g': [20.0, 20.0],
+            'pdr_5g': [0.98, 0.98],
+        })
+
+        assert opportunistic_best_rat(df.copy())['Best_RAT_opp'].tolist() == ['pc5', 'pc5']
+        assert opportunistic_best_rat(df.copy(), rats=ALL_RATS)['Best_RAT_opp'].tolist() == ['dsrc', 'dsrc']
+
+        no_dsrc = df.drop(columns=['latency_ms_dsrc', 'pdr_dsrc'])
+        assert opportunistic_best_rat(no_dsrc)['Best_RAT_opp'].tolist() == ['pc5', 'pc5']
 
 
 class TestGetLatencies:
@@ -385,7 +480,7 @@ class TestPdrReliabilityThresholds:
             'pdr_5g': 0.5,
         })
 
-        result = select_best_rat(row, 'lstm')
+        result = select_best_rat(row, 'lstm', ALL_RATS)
 
         assert result == 'dsrc', "RAT at exactly threshold should be selected"
 

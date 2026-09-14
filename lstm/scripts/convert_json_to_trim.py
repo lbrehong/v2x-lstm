@@ -36,6 +36,11 @@ import argparse
 import numpy as np
 import pandas as pd
 
+from config import LATENCY_BOUNDS
+
+# Max gap between a ping and the radio sample joined onto it
+RADIO_MATCH_TOLERANCE_MS = 2000
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,8 +52,12 @@ def _load_df_json(path: str) -> pd.DataFrame:
 
 
 def _ts_to_epoch_ms(ts_series: pd.Series) -> pd.Series:
-    """Convert a datetime Series to epoch milliseconds (float)."""
-    return ts_series.astype(np.int64) / 1e6
+    """Convert a datetime Series to epoch milliseconds (float), whatever its unit or timezone."""
+    ts = pd.to_datetime(ts_series)
+    if ts.dt.tz is not None:
+        ts = ts.dt.tz_convert("UTC").dt.tz_localize(None)
+    # read_json may return datetime64[ms] (pandas 3): normalise to ns before casting
+    return pd.Series(ts.to_numpy(dtype="datetime64[ns]").astype(np.int64) / 1e6, index=ts.index)
 
 
 def _merge_asof_nearest(
@@ -80,11 +89,52 @@ def _merge_asof_nearest(
 # Per-RAT converters
 # ---------------------------------------------------------------------------
 
+def _merge_radio(df: pd.DataFrame, radio: pd.DataFrame) -> pd.DataFrame:
+    """Join 5G radio metrics from df_radio.json onto ping rows of the same UE IP.
+
+    Both files carry the datalake time, so each ping takes the nearest radio
+    sample of its UE. The UE log has no SINR/RSRP: sinr takes pusch_snr and
+    rsrp takes -ul_path_loss as a proxy. Pings without a radio sample within
+    RADIO_MATCH_TOLERANCE_MS are forward/back-filled from the same IP.
+    """
+    df = df.copy()
+    df["_order"] = np.arange(len(df))
+    df["_ts_ms"] = df["tx_timestamp_ms"].astype(float)
+
+    radio = radio.dropna(subset=["timestamp"]).copy()
+    radio["_ts_ms"] = _ts_to_epoch_ms(radio["timestamp"]).astype(float)
+
+    parts = []
+    for ip, rows in df.groupby("ip", sort=False):
+        rows = rows.sort_values("_ts_ms")
+        samples = radio.loc[radio["ip"] == ip, ["_ts_ms", "pusch_snr", "ul_path_loss"]]
+        if samples.empty:
+            parts.append(rows.assign(pusch_snr=np.nan, ul_path_loss=np.nan))
+            continue
+        parts.append(pd.merge_asof(
+            rows, samples.sort_values("_ts_ms"), on="_ts_ms",
+            direction="nearest", tolerance=float(RADIO_MATCH_TOLERANCE_MS),
+        ))
+
+    merged = pd.concat(parts).sort_values("_order")
+    print(f"  5G radio metrics matched for {merged['pusch_snr'].notna().mean():.1%} of pings")
+    merged["sinr"] = merged["pusch_snr"]
+    merged["rsrp"] = -merged["ul_path_loss"]
+    merged[["sinr", "rsrp"]] = merged.groupby("ip")[["sinr", "rsrp"]].transform(
+        lambda s: s.ffill().bfill())
+    return merged.drop(columns=["_order", "_ts_ms", "pusch_snr", "ul_path_loss"]).reset_index(drop=True)
+
+
 def convert_5g(
     input_dir: str,
     gps_path: str | None,
 ) -> pd.DataFrame | None:
-    """Convert df_ping.json (+ optional df_gps.json) -> trim_5g format."""
+    """Convert df_ping.json (+ df_radio.json or df_gps.json) -> trim_5g format.
+
+    PDR comes from each ping's packet_loss (share of its probes lost) when
+    df_ping.json has that column. SINR/RSRP come from df_radio.json when
+    present (see _merge_radio), otherwise from df_gps.json.
+    """
     ping_path = os.path.join(input_dir, "df_ping.json")
     if not os.path.exists(ping_path):
         print("  df_ping.json not found — skipping 5G")
@@ -114,7 +164,16 @@ def convert_5g(
         df["tx_latitude"] = np.nan
         df["tx_longitude"] = np.nan
 
-    # SINR / RSRP — try df_gps.json
+    # PDR from the ping's own probe loss
+    if "packet_loss" in df.columns:
+        df["pdr"] = 1.0 - pd.to_numeric(df["packet_loss"], errors="coerce") / 100.0
+
+    # SINR / RSRP — prefer df_radio.json
+    radio_path = os.path.join(input_dir, "df_radio.json")
+    if os.path.exists(radio_path) and "ip" in df.columns:
+        df = _merge_radio(df, _load_df_json(radio_path))
+
+    # SINR / RSRP (if still missing) and GPS fallback — try df_gps.json
     gps_file = gps_path or os.path.join(input_dir, "df_gps.json")
     if os.path.exists(gps_file):
         gps = _load_df_json(gps_file)
@@ -123,7 +182,7 @@ def convert_5g(
         else:
             gps["_ts_ms"] = gps["timestamp"].astype(float)
 
-        cols_to_merge = [c for c in ["sinr", "rsrp"] if c in gps.columns]
+        cols_to_merge = [c for c in ["sinr", "rsrp"] if c in gps.columns and c not in df.columns]
         if cols_to_merge:
             df = _merge_asof_nearest(
                 df, gps, "tx_timestamp_ms", "_ts_ms", cols_to_merge,
@@ -147,9 +206,14 @@ def convert_5g(
     if "rsrp" not in df.columns:
         df["rsrp"] = np.nan
 
-    out = df[["tx_seq_num", "tx_timestamp_ms", "tx_latitude", "tx_longitude",
-              "latency_ms", "sinr", "rsrp"]].copy()
+    columns = ["tx_seq_num", "tx_timestamp_ms", "tx_latitude", "tx_longitude",
+               "latency_ms", "sinr", "rsrp"]
+    if "pdr" in df.columns:
+        columns.append("pdr")
+    out = df[columns].copy()
     out.dropna(subset=["latency_ms"], inplace=True)
+    # Clip multi-second stalls to the 5G latency bound: they stay "very bad" without dominating the loss
+    out["latency_ms"] = out["latency_ms"].clip(upper=LATENCY_BOUNDS["5g"][1])
     out.reset_index(drop=True, inplace=True)
     return out
 

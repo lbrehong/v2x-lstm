@@ -28,6 +28,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
+import copy
 import random
 import time
 from collections import Counter
@@ -44,8 +45,10 @@ import config
 from config import (
     TIMESTEPS, MODEL_DIR, PDR_CORRECTION_EXPONENT,
     create_latency_scaler, TX_INTERVAL_MS,
+    ALL_RATS, DEFAULT_RATS, validate_rats,
 )
 from utils import row_to_network_state, ensure_dir_exists
+from learning.model import evaluate_torch, fit_torch, predict_torch, save_torch_model
 from selection.api import RATSelectionAPI
 from queuesim.queue_simulator import QueueSimulator
 from queuesim.dtmc_sizer import correct_pdr_for_packet_size
@@ -216,51 +219,35 @@ def _retrain_model(
     """
     model = api.models[rat_str]
 
-    # Save weights for potential rollback
-    weights_before = model.get_weights()
-
-    # Recompile optimizer with gradient clipping if not already set
-    if not getattr(model.optimizer, "clipnorm", None):
-        from keras.optimizers import Adam
-        from learning.model import rmse
-        lr = float(model.optimizer.learning_rate)
-        model.compile(
-            optimizer=Adam(learning_rate=lr, clipnorm=1.0),
-            loss={"latency_ms": "mse", "pdr": "mse"},
-            loss_weights={"latency_ms": 1.0, "pdr": 1.5},
-            metrics={"latency_ms": [rmse], "pdr": [rmse]},
-        )
+    # Save weights for potential rollback (optimizer state is not rolled back)
+    weights_before = copy.deepcopy(model.state_dict())
 
     # Evaluate loss before retraining
-    # Returns [total_loss, latency_loss, pdr_loss, latency_rmse, pdr_rmse]
+    # [total_loss, latency_loss, pdr_loss, latency_rmse, pdr_rmse]
     y_dict = {"latency_ms": y_latency, "pdr": y_pdr}
-    eval_before = model.evaluate(x_buffer, y_dict, verbose=0)
-    if not isinstance(eval_before, list):
-        eval_before = [eval_before, None, None, None, None]
+    metrics_before = evaluate_torch(model, x_buffer, y_dict)
+    eval_before = [metrics_before[k] for k in
+                   ("loss", "latency_ms_loss", "pdr_loss", "latency_ms_rmse", "pdr_rmse")]
 
     loss_before = eval_before[0]
 
-    # Retrain for 1 epoch with validation split
-    lr_before = float(model.optimizer.learning_rate)
+    # Retrain for 1 epoch with validation split and per-weight gradient clipping
+    lr_before = float(model.optimizer.param_groups[0]["lr"])
     t0 = time.time()
-    history = model.fit(
-        x_buffer, y_dict,
+    h = fit_torch(
+        model, x_buffer, y_dict,
         epochs=1, batch_size=32, verbose=1,
-        validation_split=0.15,
+        validation_split=0.15, clipnorm=1.0,
     )
     train_time_s = time.time() - t0
-    h = history.history
 
     # Evaluate loss after retraining on the full buffer
-    eval_after = model.evaluate(x_buffer, y_dict, verbose=0)
-    if not isinstance(eval_after, list):
-        eval_after = [eval_after]
-    loss_after = eval_after[0]
+    loss_after = evaluate_torch(model, x_buffer, y_dict)["loss"]
 
     # Rollback if loss spiked significantly
     rolled_back = False
     if loss_before > 0 and loss_after > loss_before * 2.0:
-        model.set_weights(weights_before)
+        model.load_state_dict(weights_before)
         rolled_back = True
         print(
             f"  WARNING: Rolled back {api.model_type}_{rat_str} cycle {cycle}: "
@@ -268,9 +255,7 @@ def _retrain_model(
         )
 
     # Prediction accuracy snapshot (MAE in real units)
-    preds = model.predict(x_buffer, verbose=0)
-    pred_latency_norm = preds[0].flatten()
-    pred_pdr = preds[1].flatten()
+    pred_latency_norm, pred_pdr = predict_torch(model, x_buffer)
     # Denormalize latency predictions and targets using per-RAT scaler
     lat_scaler = latency_scaler if latency_scaler is not None else api.latency_scaler
     pred_latency_ms = lat_scaler.inverse_transform(
@@ -333,9 +318,11 @@ def run_feedback_loop(
     sim_tx_interval_ms: Optional[int] = None,
     enable_dtmc: bool = True,
     enable_pqos: bool = True,
+    rats=DEFAULT_RATS,
 ):
     if not enable_pqos:
         enable_dtmc = False
+    rats = validate_rats(rats)
 
     if seed is not None:
         random.seed(seed)
@@ -349,21 +336,19 @@ def run_feedback_loop(
     print(f"Loaded {len(df)} rows from {input_csv}")
 
     # Initialise components
-    api = RATSelectionAPI(model_type=model_type)
+    api = RATSelectionAPI(model_type=model_type, rats=rats)
     qsim = QueueSimulator(
         base_packet_size=base_packet_size,
         correction_exponent=correction_exponent,
         enable_dtmc=enable_dtmc,
     )
     latency_scalers = {
-        rat: create_latency_scaler(rat) for rat in ("5g", "pc5", "dsrc")
+        rat: create_latency_scaler(rat) for rat in rats
     }
 
     # Per-RAT retraining buffers:  list of (sequence, y_latency_norm, y_pdr)
-    buffers: Dict[str, List[Tuple[np.ndarray, float, float]]] = {
-        "dsrc": [], "pc5": [], "5g": [],
-    }
-    retrain_count: Dict[str, int] = {"dsrc": 0, "pc5": 0, "5g": 0}
+    buffers: Dict[str, List[Tuple[np.ndarray, float, float]]] = {rat: [] for rat in rats}
+    retrain_count: Dict[str, int] = {rat: 0 for rat in rats}
 
     # Logging
     row_log: List[Dict] = []
@@ -552,9 +537,9 @@ def run_feedback_loop(
         if retrain_count.get(rat_str, 0) > 0:
             save_path = os.path.join(
                 MODEL_DIR,
-                f"retrained_{model_type}_{rat_str}_{int(time.time())}.keras",
+                f"retrained_{model_type}_{rat_str}_{int(time.time())}.pt",
             )
-            model.save(save_path)
+            save_torch_model(model, save_path)
             print(f"Final retrained model saved to {save_path}")
 
     # DTMC stats
@@ -630,7 +615,7 @@ def run_feedback_loop(
     print(f"  Mean packet size:      {mean_pkt:.0f} bytes")
     print(f"  RAT switches:          {rat_switches}")
     print(f"  Retrain cycles:        {sum(retrain_count.values())} "
-          f"(dsrc={retrain_count['dsrc']}, pc5={retrain_count['pc5']}, 5g={retrain_count['5g']})")
+          f"({', '.join(f'{rat}={n}' for rat, n in retrain_count.items())})")
     print(f"  RAT distribution:      {rat_dist}")
     for k, v in dtmc_stats.items():
         print(f"  {k}: {v}")
@@ -655,6 +640,7 @@ def run_multi_vehicle_loop(
     enable_contention: bool = True,
     enable_dtmc: bool = True,
     enable_pqos: bool = True,
+    rats=DEFAULT_RATS,
 ):
     """Run multi-vehicle platoon simulation with optional contention effects.
 
@@ -664,6 +650,8 @@ def run_multi_vehicle_loop(
     if not enable_pqos:
         enable_contention = False
         enable_dtmc = False
+    rats = validate_rats(rats)
+    rat_enums = [RATType.from_string(rat) for rat in rats]
 
     if seed is not None:
         random.seed(seed)
@@ -696,9 +684,9 @@ def run_multi_vehicle_loop(
     print(f"Simulating {num_vehicles} vehicles\n")
 
     # Shared components
-    api = RATSelectionAPI(model_type=model_type)
+    api = RATSelectionAPI(model_type=model_type, rats=rats)
     latency_scalers = {
-        rat: create_latency_scaler(rat) for rat in ("5g", "pc5", "dsrc")
+        rat: create_latency_scaler(rat) for rat in rats
     }
 
     # Per-vehicle components
@@ -714,15 +702,13 @@ def run_multi_vehicle_loop(
     ]
     # Per-vehicle history mirrors the api._history structure
     vehicle_histories: List[Dict[str, list]] = [
-        {"dsrc": [], "pc5": [], "5g": []}
+        {rat: [] for rat in rats}
         for _ in range(num_vehicles)
     ]
 
     # Global per-RAT retraining buffers
-    buffers: Dict[str, List[Tuple[np.ndarray, float, float]]] = {
-        "dsrc": [], "pc5": [], "5g": [],
-    }
-    retrain_count: Dict[str, int] = {"dsrc": 0, "pc5": 0, "5g": 0}
+    buffers: Dict[str, List[Tuple[np.ndarray, float, float]]] = {rat: [] for rat in rats}
+    retrain_count: Dict[str, int] = {rat: 0 for rat in rats}
 
     # Logging
     row_log: List[Dict] = []
@@ -828,7 +814,7 @@ def run_multi_vehicle_loop(
                     )
 
             utilization_per_rat: Dict[RATType, float] = {}
-            for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
+            for rat_enum in rat_enums:
                 pkts = packets_per_rat.get(rat_enum, [])
                 n = vehicles_per_rat.get(rat_enum, 0)
                 utilization_per_rat[rat_enum] = compute_channel_utilization(
@@ -841,7 +827,7 @@ def run_multi_vehicle_loop(
                 contention_ctx = {
                     rat_enum: (vehicles_per_rat.get(rat_enum, 0),
                                utilization_per_rat[rat_enum])
-                    for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]
+                    for rat_enum in rat_enums
                 }
                 for v in range(num_vehicles):
                     if vehicle_rats[v] not in overloaded_rats:
@@ -875,7 +861,7 @@ def run_multi_vehicle_loop(
                         packets_per_rat.setdefault(vehicle_rats[v], []).append(
                             pkt_decisions[v].packet_size_bytes,
                         )
-                for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
+                for rat_enum in rat_enums:
                     pkts = packets_per_rat.get(rat_enum, [])
                     n = vehicles_per_rat.get(rat_enum, 0)
                     utilization_per_rat[rat_enum] = compute_channel_utilization(
@@ -884,7 +870,7 @@ def run_multi_vehicle_loop(
 
             # Log contention for this time step
             contention_entry = {"idx": idx, "sim_time": round(sim_time, 4)}
-            for rat_enum in [RATType.DSRC, RATType.PC5, RATType.FiveG]:
+            for rat_enum in rat_enums:
                 rstr = RAT_STR[rat_enum]
                 contention_entry[f"n_{rstr}"] = vehicles_per_rat.get(rat_enum, 0)
                 contention_entry[f"utilization_{rstr}"] = round(
@@ -985,7 +971,7 @@ def run_multi_vehicle_loop(
             if not enable_pqos:
                 sim_time += sim_dt
                 continue
-            for rat_str_r in ("dsrc", "pc5", "5g"):
+            for rat_str_r in rats:
                 if len(buffers[rat_str_r]) >= retrain_interval and rat_str_r in api.models:
                     retrain_count[rat_str_r] += 1
                     buf = buffers[rat_str_r]
@@ -1031,9 +1017,9 @@ def run_multi_vehicle_loop(
             if retrain_count.get(rat_str, 0) > 0:
                 save_path = os.path.join(
                     MODEL_DIR,
-                    f"retrained_{model_type}_{rat_str}_{int(time.time())}.keras",
+                    f"retrained_{model_type}_{rat_str}_{int(time.time())}.pt",
                 )
-                model.save(save_path)
+                save_torch_model(model, save_path)
                 print(f"Final retrained model saved to {save_path}")
 
     # Contention log
@@ -1147,7 +1133,7 @@ def run_multi_vehicle_loop(
     print(f"  Throughput:            {throughput_bps:.2f} bytes/s  ({successful_bytes} bytes)")
     print(f"  Total RAT switches:    {sum(vehicle_switches)}")
     print(f"  Retrain cycles:        {sum(retrain_count.values())} "
-          f"(dsrc={retrain_count['dsrc']}, pc5={retrain_count['pc5']}, 5g={retrain_count['5g']})")
+          f"({', '.join(f'{rat}={n}' for rat, n in retrain_count.items())})")
     print(f"  RAT distribution:      {rat_dist}")
     for k, v in dtmc_agg.items():
         print(f"  {k}: {v}")
@@ -1164,6 +1150,7 @@ def run_multi_vehicle_loop(
             correction_exponent=correction_exponent,
             num_vehicles=num_vehicles,
             sim_tx_interval_ms=sim_tx_interval_ms,
+            rats=rats,
             enable_contention=False,
             enable_dtmc=enable_dtmc,
         )
@@ -1177,6 +1164,7 @@ def run_multi_vehicle_loop(
             correction_exponent=correction_exponent,
             num_vehicles=num_vehicles,
             sim_tx_interval_ms=sim_tx_interval_ms,
+            rats=rats,
             enable_contention=enable_contention,
             enable_dtmc=False,
         )
@@ -1190,6 +1178,7 @@ def run_multi_vehicle_loop(
             correction_exponent=correction_exponent,
             num_vehicles=num_vehicles,
             sim_tx_interval_ms=sim_tx_interval_ms,
+            rats=rats,
             enable_contention=False,
             enable_dtmc=False,
         )
@@ -1204,6 +1193,7 @@ def run_multi_vehicle_loop(
             correction_exponent=correction_exponent,
             num_vehicles=num_vehicles,
             sim_tx_interval_ms=sim_tx_interval_ms,
+            rats=rats,
             enable_contention=False,
             enable_dtmc=False,
             enable_pqos=False,
@@ -1235,6 +1225,8 @@ def main():
                         help="Disable DTMC adaptive packet sizing (use fixed base_packet_size)")
     parser.add_argument("--no-pqos", action="store_true",
                         help="Disable pQoS model inference (opportunistic baseline)")
+    parser.add_argument("--rats", nargs="+", default=list(DEFAULT_RATS), choices=ALL_RATS,
+                        help=f"RATs eligible for selection (default: {' '.join(DEFAULT_RATS)})")
     args = parser.parse_args()
 
     if args.num_vehicles > 1:
@@ -1249,6 +1241,7 @@ def main():
             sim_tx_interval_ms=args.tx_interval,
             enable_dtmc=not args.no_dtmc,
             enable_pqos=not args.no_pqos,
+            rats=args.rats,
         )
     else:
         run_feedback_loop(
@@ -1261,6 +1254,7 @@ def main():
             sim_tx_interval_ms=args.tx_interval,
             enable_dtmc=not args.no_dtmc,
             enable_pqos=not args.no_pqos,
+            rats=args.rats,
         )
 
 

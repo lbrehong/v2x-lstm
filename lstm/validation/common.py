@@ -43,7 +43,7 @@ def build_model_pair(model_type, rat, timesteps, features, seed):
         (tf_model, torch_model), both on CPU, with guaranteed-identical initial weights.
     """
     from learning.weight_transfer import build_tf_model_with_seed, transplant
-    from learning.model_torch import build_model_torch
+    from learning.model import build_model_torch
 
     tf_model = build_tf_model_with_seed(model_type, timesteps, features, seed)
     torch_model = build_model_torch(model_type, timesteps, features)

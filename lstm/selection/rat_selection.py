@@ -24,15 +24,15 @@ import numpy as np
 import scipy.stats as st
 from tabulate import tabulate
 import folium
-from keras.models import load_model
 
 from config import (
     MODEL_DIR, OUTPUT_DIR, TIMESTEPS, TARGET_COLS, RATS, MODELS,
+    ALL_RATS, DEFAULT_RATS, validate_rats,
     PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS,
     create_gps_scaler, create_latency_scaler,
 )
 from utils import get_latest_model
-from learning.model import rmse, automatic_train
+from learning.model import automatic_train_torch, load_torch_model, predict_torch
 from learning.data_preprocessing import preprocess_lstm_input
 from selection.file_integration import process_batch
 
@@ -81,15 +81,7 @@ def get_predictions(model, rat, gps_data):
     if input_sequences.shape[0] == 0:
         raise ValueError("Error: No input sequences generated. Check GPS preprocessing.")
 
-    predictions = model.predict(input_sequences)
-    predictions = np.array(predictions)
-
-    if predictions.shape == (2, len(gps_data), 1):
-        predictions = predictions.reshape(len(gps_data), 2)
-
-    print("Processed Predictions Shape:", predictions.shape)
-
-    pred_latency, pred_pdr = predictions[:, 0].flatten(), predictions[:, 1].flatten()
+    pred_latency, pred_pdr = predict_torch(model, input_sequences)
     pred_latency = np.clip(pred_latency, 0.0, 1.0)
     latency = latency_scalers[rat].inverse_transform(np.array(pred_latency).reshape(-1, 1)).flatten()
     pdr = np.clip(pred_pdr, 0.0, 1.0)
@@ -100,24 +92,15 @@ def get_predictions(model, rat, gps_data):
     return latency, pdr
 
 
-def merge_csvs(directory):
-    """Merge base CSV files with matched DSRC and PC5 data, including signal columns."""
+def merge_csvs(directory, rats=DEFAULT_RATS):
+    """
+    Merge base CSV files with matched secondary RAT data, including signal columns.
+
+    Only secondary RATs in `rats` are merged. A selected RAT whose matched CSV
+    is missing gets NaN latency/PDR columns, so selection treats it as unavailable.
+    """
+    rats = validate_rats(rats)
     df_super = pd.read_csv(os.path.join(directory, "super.csv"))
-
-    # DSRC: include signal quality columns for feedback loop feature vectors
-    dsrc_cols = ["tx_latitude", "tx_longitude", "latency_ms", "pdr"]
-    dsrc_path = os.path.join(directory, "matched_dsrc.csv")
-    dsrc_available = pd.read_csv(dsrc_path, nrows=0).columns.tolist()
-    for col in ("rsrp_1", "rsrp_2"):
-        if col in dsrc_available:
-            dsrc_cols.append(col)
-    df_base_dsrc = pd.read_csv(dsrc_path, usecols=dsrc_cols)
-    df_base_dsrc.rename(columns={"latency_ms": "latency_ms_dsrc", "pdr": "pdr_dsrc"}, inplace=True)
-
-    # PC5
-    df_base_pc5 = pd.read_csv(os.path.join(directory, "matched_pc5.csv"),
-                               usecols=["tx_latitude", "tx_longitude", "latency_ms", "pdr"])
-    df_base_pc5.rename(columns={"latency_ms": "latency_ms_pc5", "pdr": "pdr_pc5"}, inplace=True)
 
     # 5G: include signal quality columns
     fiveg_path = os.path.join(directory, "matched_5g.csv")
@@ -128,14 +111,27 @@ def merge_csvs(directory):
                                     usecols=["tx_latitude", "tx_longitude"] + fiveg_signal_cols)
         df_super = df_super.merge(df_5g_signal, on=["tx_latitude", "tx_longitude"], how="left")
 
-    df_super = df_super.merge(df_base_dsrc, on=["tx_latitude", "tx_longitude"], how="left")
-    df_super = df_super.merge(df_base_pc5, on=["tx_latitude", "tx_longitude"], how="left")
+    # DSRC (with signal quality columns for feedback loop feature vectors), then PC5
+    for rat, signal_cols in (("dsrc", ("rsrp_1", "rsrp_2")), ("pc5", ())):
+        if rat not in rats:
+            continue
+        rat_path = os.path.join(directory, f"matched_{rat}.csv")
+        if not os.path.exists(rat_path):
+            print(f"  matched_{rat}.csv not found, {rat} marked unavailable")
+            df_super[f"latency_ms_{rat}"] = np.nan
+            df_super[f"pdr_{rat}"] = np.nan
+            continue
+        available = pd.read_csv(rat_path, nrows=0).columns.tolist()
+        cols = ["tx_latitude", "tx_longitude", "latency_ms", "pdr"] + [c for c in signal_cols if c in available]
+        df_rat = pd.read_csv(rat_path, usecols=cols).rename(
+            columns={"latency_ms": f"latency_ms_{rat}", "pdr": f"pdr_{rat}"})
+        df_super = df_super.merge(df_rat, on=["tx_latitude", "tx_longitude"], how="left")
 
     df_super.to_csv(os.path.join(directory, "super_merged.csv"), index=False)
     return df_super
 
 
-def add_predictions(df, directory, model_types=None, output_dir=None):
+def add_predictions(df, directory, model_types=None, output_dir=None, rats=DEFAULT_RATS):
     """Add model predictions to the dataframe.
 
     Args:
@@ -145,6 +141,7 @@ def add_predictions(df, directory, model_types=None, output_dir=None):
         output_dir: Pipeline output directory (fallback for final_log files).
                     Uses config.OUTPUT_DIR if None — note that the module-level
                     OUTPUT_DIR import is stale when run_pipeline.py overrides it.
+        rats: RATs whose predictions are added (default: DEFAULT_RATS).
     """
     import config as _cfg
     fallback_dir = output_dir or _cfg.OUTPUT_DIR
@@ -155,7 +152,7 @@ def add_predictions(df, directory, model_types=None, output_dir=None):
     df["_lon_r"] = df["tx_longitude"].round(GPS_DECIMALS)
 
     for model_type in (model_types or MODELS):
-        for rat in RATS:
+        for rat in validate_rats(rats):
             filename = os.path.join(directory, f"final_log_{model_type}_{rat}.csv")
 
             try:
@@ -183,7 +180,7 @@ def add_predictions(df, directory, model_types=None, output_dir=None):
     return df
 
 
-def select_best_rat(row, model_type):
+def select_best_rat(row, model_type, rats=DEFAULT_RATS):
     """
     Select the optimal RAT based on predicted QoS metrics.
 
@@ -198,14 +195,16 @@ def select_best_rat(row, model_type):
     Args:
         row: DataFrame row containing prediction columns for all RATs
         model_type: Model architecture name (lstm, gru, rnn)
+        rats: RATs eligible for selection (default: DEFAULT_RATS)
 
     Returns:
-        String identifier of selected RAT: 'dsrc', 'pc5', '5g', or 'NaN'
+        String identifier of selected RAT (one of `rats`) or 'NaN'
     """
+    # A RAT without a model or measurements (e.g. no DSRC data) has no columns -> NaN, filtered below
     options = [
-        ("dsrc", row[f"pred_latency_ms_dsrc_{model_type}"], row[f"pred_pdr_dsrc_{model_type}"], row["pdr_dsrc"]),
-        ("pc5", row[f"pred_latency_ms_pc5_{model_type}"], row[f"pred_pdr_pc5_{model_type}"], row["pdr_pc5"]),
-        ("5g", row[f"pred_latency_ms_5g_{model_type}"], row[f"pred_pdr_5g_{model_type}"], row["pdr_5g"]),
+        (rat, row.get(f"pred_latency_ms_{rat}_{model_type}", np.nan),
+         row.get(f"pred_pdr_{rat}_{model_type}", np.nan), row.get(f"pdr_{rat}", np.nan))
+        for rat in validate_rats(rats)
     ]
 
     # Filter out options with NaN predictions
@@ -241,7 +240,7 @@ def select_best_rat(row, model_type):
     return best_rat
 
 
-def opportunistic_best_rat(df):
+def opportunistic_best_rat(df, rats=DEFAULT_RATS):
     """
     Select RAT using opportunistic (reactive) algorithm without prediction.
 
@@ -255,18 +254,24 @@ def opportunistic_best_rat(df):
         4. Fall back to 5G if available, else mark as unavailable
 
     Args:
-        df: DataFrame with actual latency and PDR columns for all RATs
+        df: DataFrame with actual latency and PDR columns for the RATs
+        rats: RATs eligible for selection (default: DEFAULT_RATS)
 
     Returns:
         DataFrame with 'Best_RAT_opp' column added
     """
+    rats = validate_rats(rats)
+    columns = {
+        rat: (df[f"latency_ms_{rat}"] if f"latency_ms_{rat}" in df else pd.Series(np.nan, index=df.index),
+              df[f"pdr_{rat}"] if f"pdr_{rat}" in df else pd.Series(np.nan, index=df.index))
+        for rat in rats
+    }
     best_rat_list = []
     previous_rat = "5g"
-    for row in df.itertuples():
+    for i in range(len(df)):
         options = [
-            ("dsrc", row.latency_ms_dsrc, row.pdr_dsrc),
-            ("pc5", row.latency_ms_pc5, row.pdr_pc5),
-            ("5g", row.latency_ms_5g, row.pdr_5g),
+            (rat, columns[rat][0].iat[i], columns[rat][1].iat[i])
+            for rat in rats
         ]
         # Filter by PDR threshold (>5%)
         valid_options = [opt for opt in options if opt[2] > 0.05]
@@ -289,7 +294,7 @@ def opportunistic_best_rat(df):
 
         if len(valid_options) == 1 and valid_options[0][0] == "5g":
             best_rat = "5g"
-        elif previous_rat == "5g" and any(rat[0] in ["dsrc", "pc5"] for rat in valid_options):
+        elif previous_rat == "5g" and any(rat[0] != "5g" for rat in valid_options):
             best_rat = min(valid_options, key=lambda x: x[1])[0]
         elif any(rat[0] == previous_rat for rat in valid_options):
             best_rat = previous_rat
@@ -319,12 +324,12 @@ def process_all(input_dir):
         print("___ Preprocessing complete.")
 
         for model_type in MODELS:
-            model_f = load_model(get_latest_model(model_type, rat), custom_objects={'rmse': rmse})
+            model_f = load_torch_model(get_latest_model(model_type, rat))
 
             print("____________________________________________________")
             print("Automatic retraining.")
-            automatic_train(model_f, X_new, y_new, 32, 200, 0.15,
-                            os.path.join(OUTPUT_DIR, f"final_log_{model_type}_{rat}.csv"), rat, model_type)
+            automatic_train_torch(model_f, X_new, y_new, 32, 200, 0.15,
+                                  os.path.join(OUTPUT_DIR, f"final_log_{model_type}_{rat}.csv"), rat, model_type)
 
             print(f"{rat}: {model_type} predictions done.")
 
@@ -346,9 +351,9 @@ def process_file(input_csv, model_type, output_csv, input_dir):
     (X_dsrc, y_dsrc, scalers) = preprocess_lstm_input(df, new=True, rat="dsrc",
                                                        target_cols=TARGET_COLS, seq_length=TIMESTEPS)
 
-    model_dsrc = load_model(get_latest_model(model_type, "dsrc"), custom_objects={'rmse': rmse})
-    model_cv2x = load_model(get_latest_model(model_type, "pc5"), custom_objects={'rmse': rmse})
-    model_5g = load_model(get_latest_model(model_type, "5g"), custom_objects={'rmse': rmse})
+    model_dsrc = load_torch_model(get_latest_model(model_type, "dsrc"))
+    model_cv2x = load_torch_model(get_latest_model(model_type, "pc5"))
+    model_5g = load_torch_model(get_latest_model(model_type, "5g"))
 
     print("GPS Data shape:", df.shape)
     print("First few GPS entries:\n", df[:5])
@@ -494,9 +499,10 @@ def get_metric(df, scheme_column, metric):
                     if pd.notna(row[scheme_column]) else None, axis=1)
 
 
-def make_table(input_csv, output_dir=OUTPUT_DIR):
+def make_table(input_csv, output_dir=OUTPUT_DIR, rats=DEFAULT_RATS):
     """Generate summary statistics table."""
     df = pd.read_csv(input_csv)
+    rats = validate_rats(rats)
 
     summary_data = {}
     schemes = ["Best_RAT_lstm", "Best_RAT_gru", "Best_RAT_rnn", "Best_RAT_opp"]
@@ -511,37 +517,24 @@ def make_table(input_csv, output_dir=OUTPUT_DIR):
         avg_latency, ci_latency = mean_ci(latency_values)
         max_latency = np.max(latency_values.dropna()) if not latency_values.dropna().empty else np.nan
 
-        rat_latencies = {
-            "dsrc": get_latencies(df[df[scheme] == "dsrc"], scheme),
-            "pc5": get_latencies(df[df[scheme] == "pc5"], scheme),
-            "5g": get_latencies(df[df[scheme] == "5g"], scheme),
-        }
-
-        avg_dsrc_latency, ci_dsrc = mean_ci(rat_latencies["dsrc"])
-        avg_pc5_latency, ci_pc5 = mean_ci(rat_latencies["pc5"])
-        avg_5g_latency, ci_5g = mean_ci(rat_latencies["5g"])
-
         total_messages = len(df)
 
-        pct_dsrc = (df[scheme] == "dsrc").sum() / total_messages * 100
-        pct_pc5 = (df[scheme] == "pc5").sum() / total_messages * 100
-        pct_5g = (df[scheme] == "5g").sum() / total_messages * 100
+        per_rat_latency = [mean_ci(get_latencies(df[df[scheme] == rat], scheme)) for rat in rats]
+        per_rat_usage = [((df[scheme] == rat).sum() / total_messages * 100, 0) for rat in rats]
 
         summary_data[scheme_name] = [
             (avg_pdr, ci_pdr),
             (avg_latency, ci_latency),
-            (avg_dsrc_latency, ci_dsrc),
-            (avg_pc5_latency, ci_pc5),
-            (avg_5g_latency, ci_5g),
+            *per_rat_latency,
             (max_latency, 0),
-            (pct_dsrc, 0),
-            (pct_pc5, 0),
-            (pct_5g, 0)
+            *per_rat_usage,
         ]
 
     summary_df = pd.DataFrame(summary_data, index=[
-        "Avg PDR", "Avg Latency", "Avg DSRC Latency", "Avg PC5 Latency", "Avg 5G Latency",
-        "Max Latency", "DSRC Usage (%)", "PC5 Usage (%)", "5G Usage (%)"
+        "Avg PDR", "Avg Latency",
+        *[f"Avg {rat.upper()} Latency" for rat in rats],
+        "Max Latency",
+        *[f"{rat.upper()} Usage (%)" for rat in rats],
     ])
 
     summary_df = summary_df.map(lambda x: f"{x[0]:.3f} ± {x[1]:.3f}" if isinstance(x, tuple) else x)
@@ -550,13 +543,14 @@ def make_table(input_csv, output_dir=OUTPUT_DIR):
     summary_df.to_csv(os.path.join(output_dir, "best_perf_table.csv"), index=False)
 
 
-def make_rmse_table(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR):
+def make_rmse_table(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR, rats=DEFAULT_RATS):
     """Generate RMSE summary table."""
+    rats = validate_rats(rats)
     rmse_summary = {}
 
     for model_type in MODELS:
         scheme_data = []
-        for rat in RATS:
+        for rat in rats:
             df = pd.read_csv(os.path.join(input_csv, f"final_log_{model_type}_{rat}.csv"))
             # MAE: mean of absolute errors
             latency_mae, ci_latency_mae = mean_ci(df["mae_latency"])
@@ -572,14 +566,15 @@ def make_rmse_table(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR):
 
         rmse_summary[model_type] = scheme_data
 
-    rmse_summary_df = pd.DataFrame(rmse_summary, index=["DSRC", "PC5", "5G"])
+    rmse_summary_df = pd.DataFrame(rmse_summary, index=[rat.upper() for rat in rats])
     rmse_summary_df.columns = ["LSTM", "GRU", "RNN"]
     rmse_summary_df.index.name = "RAT"
     rmse_summary_df.to_csv(os.path.join(output_dir, "best_rmse_table.csv"))
 
 
-def make_rmse_plot(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR):
+def make_rmse_plot(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR, rats=DEFAULT_RATS):
     """Generate RMSE plots."""
+    rats = validate_rats(rats)
     window_size = 250
     titles = ["LSTM", "GRU", "SimpleRNN"]
     colors = {"dsrc": "blue", "pc5": "orange", "5g": "green"}
@@ -589,7 +584,7 @@ def make_rmse_plot(input_csv=OUTPUT_DIR, output_dir=OUTPUT_DIR):
     for i, model_type in enumerate(MODELS):
         ax_lat = axes[0, i]
         ax_pdr = axes[1, i]
-        for rat in RATS:
+        for rat in rats:
             df = pd.read_csv(os.path.join(input_csv, f"final_log_{model_type}_{rat}.csv"))
 
             latency_mae_ma = df["mae_latency"].rolling(window=window_size, min_periods=1).mean()
@@ -624,11 +619,14 @@ if __name__ == "__main__":
     parser.add_argument('--mode', type=str, help="Mode: empty for calculate, 'test' for GPS data, 'view' for visualize, 'data' for statistics, 'api_batch' for queue simulator integration")
     parser.add_argument('--model_type', type=str, help="RNN model type (lstm, gru, rnn, or all)")
     parser.add_argument('--output', type=str, help="Output path for api_batch mode")
+    parser.add_argument('--rats', nargs='+', default=list(DEFAULT_RATS), choices=ALL_RATS,
+                        help=f"RATs eligible for selection (default: {' '.join(DEFAULT_RATS)})")
     args = parser.parse_args()
 
     INPUT = args.input
     MODEL_TYPE = args.model_type
     MODE = args.mode
+    ACTIVE_RATS = validate_rats(args.rats)
 
     if not MODE and MODEL_TYPE:
         if os.path.isdir(INPUT):
@@ -642,18 +640,18 @@ if __name__ == "__main__":
 
             # Build super_merged from matched CSVs
             print("_ Merging into the super-CSV.")
-            super_df = merge_csvs(INPUT)
+            super_df = merge_csvs(INPUT, rats=ACTIVE_RATS)
 
             # Predict directly on super_merged GPS — no intermediate files
             gps_data = super_df[["tx_latitude", "tx_longitude"]].copy()
 
             for mt in model_types:
-                for rat in RATS:
+                for rat in ACTIVE_RATS:
                     model_path = get_latest_model(mt, rat)
                     if model_path is None:
                         print(f"  Warning: no {mt} model found for {rat}, skipping")
                         continue
-                    model_f = load_model(model_path, custom_objects={'rmse': rmse})
+                    model_f = load_torch_model(model_path)
                     latency, pdr = get_predictions(model_f, rat, gps_data)
                     super_df[f"pred_latency_ms_{rat}_{mt}"] = latency
                     super_df[f"pred_pdr_{rat}_{mt}"] = pdr
@@ -662,9 +660,9 @@ if __name__ == "__main__":
             print("_ Predictions added.")
             print("_ Sending to the selection algorithm.")
             for mt in model_types:
-                super_df[f"Best_RAT_{mt}"] = super_df.apply(select_best_rat, args=(mt,), axis=1)
+                super_df[f"Best_RAT_{mt}"] = super_df.apply(select_best_rat, args=(mt, ACTIVE_RATS), axis=1)
             print("_ Adding opportunistic algorithm.")
-            super_df = opportunistic_best_rat(super_df)
+            super_df = opportunistic_best_rat(super_df, rats=ACTIVE_RATS)
             print("_ Algorithms done.")
             out_path = os.path.join(INPUT, "bestRAT_super.csv")
             print(f"_ Saving. {out_path}")
@@ -680,9 +678,9 @@ if __name__ == "__main__":
     elif MODE == "data":
         make_histogram_latency(INPUT)
         make_histogram_pdr(INPUT)
-        make_rmse_plot()
-        make_rmse_table()
-        make_table(INPUT)
+        make_rmse_plot(rats=ACTIVE_RATS)
+        make_rmse_table(rats=ACTIVE_RATS)
+        make_table(INPUT, rats=ACTIVE_RATS)
 
     elif MODE == "test":
         df_gps = grab_gps(INPUT)

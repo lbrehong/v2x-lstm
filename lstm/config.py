@@ -7,10 +7,10 @@ to ensure consistency across modules.
 from sklearn.preprocessing import MinMaxScaler
 
 # =============================================================================
-# GPS Bounds (Toulouse, France - test area)
+# GPS Bounds (Toulouse, France - test area, covers both large_obs tours)
 # =============================================================================
-MIN_LAT, MAX_LAT = 43.5570, 43.5650
-MIN_LON, MAX_LON = 1.4610, 1.4725
+MIN_LAT, MAX_LAT = 43.5510, 43.6365
+MIN_LON, MAX_LON = 1.4450, 1.5950
 
 # =============================================================================
 # Signal Quality Bounds
@@ -19,7 +19,7 @@ MIN_LATENCY, MAX_LATENCY = 0, 300  # global fallback (covers 5G p95≈391, DSRC 
 
 # Per-RAT latency bounds — tighter ranges improve sigmoid gradient during training
 LATENCY_BOUNDS = {
-    "5g": (0, 200),   # covers p50=32ms; p95=391ms clips to 1.0 (acceptable)
+    "5g": (0, 1000),  # pings are dense up to ~1 s; beyond is a thin tail of multi-second stalls, clipped at conversion
     "pc5": (0, 100),   # covers full range 5-93ms
     "dsrc": (0, 25),   # covers full range 0.8-19ms
 }
@@ -44,8 +44,8 @@ TRAIN_RATIO = 0.4
 # Data Collection Parameters
 # =============================================================================
 TX_INTERVAL_MS = {
-    "5g": 50,     # 5G SA OBU test traffic (20 Hz nominal, ~46ms observed due to jitter)
-    "pc5": 20,    # C-V2X PC5 sidelink rate (50 Hz, measured from raw logs)
+    "5g": 2000,   # 5G RUTX ping period (one 5-probe ping every 2 s, large_obs)
+    "pc5": 100,   # C-V2X PC5 message rate (10 Hz, measured on large_obs)
     "dsrc": 20,   # DSRC broadcast rate (50 Hz, measured from raw logs)
 }
 DEFAULT_TX_INTERVAL_MS = 100  # Fallback for unspecified RATs
@@ -193,6 +193,34 @@ OUTPUT_DIR = "output"
 NAN = "NaN"
 RATS = {"dsrc": "DSRC", "pc5": "C-V2X PC5", "5g": "5G SA"}
 MODELS = ["lstm", "gru", "rnn"]
+
+# RATs the pipeline can involve, in canonical iteration order (the order the
+# selection algorithms evaluate candidates). DEFAULT_RATS matches the DRL
+# agent's action space (../cohda/learning: 5G vs PC5) so results are comparable.
+ALL_RATS = ("dsrc", "pc5", "5g")
+DEFAULT_RATS = ("pc5", "5g")
+
+
+def validate_rats(rats):
+    """
+    Normalize a RAT set: lowercase, deduplicate, and order as in ALL_RATS.
+
+    Args:
+        rats: Iterable of RAT identifiers (e.g. ["5g", "PC5"])
+
+    Returns:
+        Tuple of RAT identifiers in ALL_RATS order
+
+    Raises:
+        ValueError: If the set is empty or contains an unknown RAT
+    """
+    requested = {str(r).lower() for r in rats}
+    unknown = requested - set(ALL_RATS)
+    if unknown:
+        raise ValueError(f"Unknown RAT(s): {sorted(unknown)}. Must be among {list(ALL_RATS)}.")
+    if not requested:
+        raise ValueError("At least one RAT must be selected.")
+    return tuple(r for r in ALL_RATS if r in requested)
 
 
 # =============================================================================
