@@ -446,6 +446,8 @@ class TestRunFeedbackLoop:
         )
 
         mock_api._previous_rat = RATType.FiveG
+        # Model input window of the observed steps (PC5 has 4 features)
+        mock_api.input_window.return_value = np.zeros((1, TIMESTEPS, 4))
 
         # _history has enough entries for sequence building
         mock_api._history = {
@@ -730,6 +732,102 @@ class TestRunFeedbackLoop:
 
         # 5 rows were UNAVAILABLE, so processed count should be 20
         assert summary["processed"] == 20
+
+    def test_fallback_steps_are_logged_and_counted(self, super_merged_csv, tmp_path):
+        """Fallback decisions are transmitted, flagged in the row log and counted in the summary."""
+        from scripts.feedback_loop import run_feedback_loop
+
+        mock_api = self._make_mock_api()
+        predicted = mock_api.select_rat.return_value
+        fallback = RATDecision(selected_rat=RATType.FiveG, confidence=0.0,
+                               predicted_latency_ms=float("nan"), predicted_pdr=float("nan"),
+                               all_predictions={}, model_type="lstm", fallback=True)
+        calls = {"n": 0}
+
+        def first_three_fallback(state, queue_ctx=None):
+            calls["n"] += 1
+            return fallback if calls["n"] <= 3 else predicted
+
+        mock_api.select_rat.side_effect = first_three_fallback
+        mock_qsim = self._make_mock_qsim()
+        output_dir = tmp_path / "output"
+
+        with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
+             patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
+             patch("config.OUTPUT_DIR", str(output_dir)), \
+             patch("scripts.feedback_loop.MODEL_DIR", str(tmp_path / "models")):
+            summary = run_feedback_loop(input_csv=super_merged_csv, model_type="lstm",
+                                        seed=42, retrain_interval=9999)
+
+        log = pd.read_csv(output_dir / "feedback_loop_log.csv")
+        assert len(log) == 25  # fallback steps are transmitted, not skipped
+        assert log["fallback"].tolist() == [True] * 3 + [False] * 22
+        assert (log.loc[log["fallback"], "selected_rat"] == "5g").all()
+        assert summary["fallback_steps"] == 3
+        assert np.isfinite(summary["mean_pred_latency"])
+
+    def test_every_step_observed_after_deciding(self, super_merged_csv, tmp_path):
+        """observe() runs once per step, after select_rat, including UNAVAILABLE steps."""
+        from scripts.feedback_loop import run_feedback_loop
+
+        mock_api = self._make_mock_api()
+        available = mock_api.select_rat.return_value
+        calls = {"n": 0}
+
+        def first_five_unavailable(state, queue_ctx=None):
+            calls["n"] += 1
+            if calls["n"] <= 5:
+                return RATDecision(selected_rat=RATType.UNAVAILABLE, confidence=0.0,
+                                   predicted_latency_ms=float("inf"), predicted_pdr=0.0,
+                                   all_predictions={}, model_type="lstm")
+            return available
+
+        mock_api.select_rat.side_effect = first_five_unavailable
+        mock_qsim = self._make_mock_qsim()
+
+        with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
+             patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
+             patch("config.OUTPUT_DIR", str(tmp_path / "output")), \
+             patch("scripts.feedback_loop.MODEL_DIR", str(tmp_path / "models")):
+            run_feedback_loop(input_csv=super_merged_csv, model_type="lstm",
+                              seed=42, retrain_interval=9999)
+
+        assert mock_api.observe.call_count == 25
+        names = [c[0] for c in mock_api.mock_calls if c[0] in ("select_rat", "observe")]
+        assert names == ["select_rat", "observe"] * 25
+
+    def test_retraining_uses_window_before_observing_step(self, super_merged_csv, tmp_path):
+        """Retraining samples pair the window captured before observe() with that step's target."""
+        from scripts.feedback_loop import run_feedback_loop
+
+        mock_api = self._make_mock_api()
+        returned = []
+
+        def window_before_observe(rat):
+            window = np.full((1, TIMESTEPS, 4), float(len(returned)))
+            # The window must be taken before this step is observed
+            assert mock_api.observe.call_count == len(returned)
+            returned.append(window)
+            return window
+
+        mock_api.input_window.side_effect = window_before_observe
+        mock_qsim = self._make_mock_qsim()
+        batches = []
+
+        with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
+             patch("scripts.feedback_loop.QueueSimulator", return_value=mock_qsim), \
+             patch("scripts.feedback_loop._retrain_model",
+                   side_effect=lambda api, rat, x, y_lat, y_pdr, **kw: batches.append((x, y_pdr))), \
+             patch("scripts.feedback_loop.save_torch_model"), \
+             patch("config.OUTPUT_DIR", str(tmp_path / "output")), \
+             patch("scripts.feedback_loop.MODEL_DIR", str(tmp_path / "models")):
+            run_feedback_loop(input_csv=super_merged_csv, model_type="lstm",
+                              seed=42, retrain_interval=5)
+
+        df = pd.read_csv(super_merged_csv)
+        x_first, y_pdr_first = batches[0]
+        np.testing.assert_array_equal(x_first, np.concatenate(returned[:5]))
+        np.testing.assert_allclose(y_pdr_first, df["pdr_pc5"].iloc[:5].to_numpy())
 
     def test_no_rat_switches_when_same_rat(self, super_merged_csv, tmp_path):
         """If API always selects the same RAT, rat_switches should be zero."""
@@ -1083,6 +1181,8 @@ class TestRunMultiVehicleLoop:
         )
 
         mock_api._previous_rat = RATType.FiveG
+        # Model input window of the observed steps (PC5 has 4 features)
+        mock_api.input_window.return_value = np.zeros((1, TIMESTEPS, 4))
 
         mock_api._history = {
             "dsrc": [np.zeros(6).tolist() for _ in range(TIMESTEPS)],
@@ -1298,6 +1398,39 @@ class TestRunMultiVehicleLoop:
             )
 
         assert summary["total_packets"] == 25 * 5
+
+    def test_each_vehicle_perturbed_and_observed_once_per_step(self, super_merged_csv, tmp_path):
+        """One measurement per vehicle per step, reused by every phase and observed after deciding."""
+        import scripts.feedback_loop as fl
+
+        mock_api = self._make_mock_api()
+        real_perturb = fl._perturb_state
+        produced = []
+
+        def recording_perturb(state, rng):
+            perturbed = real_perturb(state, rng)
+            produced.append(perturbed)
+            return perturbed
+
+        with patch("scripts.feedback_loop.RATSelectionAPI", return_value=mock_api), \
+             patch("scripts.feedback_loop.QueueSimulator", side_effect=lambda **kw: self._make_mock_qsim()), \
+             patch("scripts.feedback_loop._perturb_state", side_effect=recording_perturb) as perturb, \
+             patch("config.OUTPUT_DIR", str(tmp_path / "output")), \
+             patch("scripts.feedback_loop.MODEL_DIR", str(tmp_path / "models")):
+            # Single pass (no automatic variant runs)
+            fl.run_multi_vehicle_loop(
+                input_csv=super_merged_csv, model_type="lstm", seed=42,
+                retrain_interval=9999, num_vehicles=3,
+                enable_contention=False, enable_dtmc=False, enable_pqos=False,
+            )
+
+        assert perturb.call_count == 25 * 3
+        assert mock_api.observe.call_count == 25 * 3
+        # Each vehicle observes exactly the state it was perturbed to (and decided on) that step
+        observed = [c.args[0] for c in mock_api.observe.call_args_list]
+        assert all(o is p for o, p in zip(observed, produced))
+        decided = [c.args[0] for c in mock_api.select_rat_opportunistic.call_args_list]
+        assert all(d is p for d, p in zip(decided, produced))
 
     def test_contention_log_has_all_timesteps(self, super_merged_csv, tmp_path):
         """Contention log should have one row per time step."""

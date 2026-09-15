@@ -403,6 +403,7 @@ def run_feedback_loop(
             selected_rat = decision.selected_rat
 
             if selected_rat == RATType.UNAVAILABLE:
+                api.observe(state)  # still record the step, so history keeps filling
                 sim_time += sim_dt
                 continue
 
@@ -441,9 +442,10 @@ def run_feedback_loop(
 
             # 6. Capture sequence + ground-truth target for retraining
             if enable_pqos:
-                history = api._history[rat_str]
-                if len(history) >= TIMESTEPS:
-                    seq = np.array(history[-TIMESTEPS:])  # (TIMESTEPS, n_features)
+                # Window of the steps before this one (not yet observed) -> this step's target
+                window = api.input_window(rat_str)
+                if window is not None:
+                    seq = window[0]  # (TIMESTEPS, n_features)
 
                     # Ground-truth targets from the CSV row
                     actual_lat = _actual_latency(state, selected_rat)
@@ -500,8 +502,12 @@ def run_feedback_loop(
                 "dtmc_state": dtmc_state,
                 "dtmc_size": dtmc_size,
                 "confidence": round(decision.confidence, 4),
+                "fallback": decision.fallback,
                 "queue_depth": qsim.queue_depth,
             })
+
+            # Record this step's measurements only after deciding for it
+            api.observe(state)
 
             # Advance simulated time
             sim_time += sim_dt
@@ -594,6 +600,7 @@ def run_feedback_loop(
         "throughput_bytes_per_s": round(throughput_bps, 4),
         "mean_packet_size": round(mean_pkt, 4),
         "rat_switches": rat_switches,
+        "fallback_steps": int(log_df["fallback"].sum()) if len(log_df) else 0,
         "retrain_cycles_total": sum(retrain_count.values()),
         **{f"retrain_{k}": v for k, v in retrain_count.items()},
         **{f"rat_{k}": v for k, v in rat_dist.items()},
@@ -700,11 +707,8 @@ def run_multi_vehicle_loop(
         )
         for _ in range(num_vehicles)
     ]
-    # Per-vehicle history mirrors the api._history structure
-    vehicle_histories: List[Dict[str, list]] = [
-        {rat: [] for rat in rats}
-        for _ in range(num_vehicles)
-    ]
+    # Per-vehicle decision state: observed history, last observation, sticky RAT
+    vehicle_contexts: List[Dict] = [api.get_context() for _ in range(num_vehicles)]
 
     # Global per-RAT retraining buffers
     buffers: Dict[str, List[Tuple[np.ndarray, float, float]]] = {rat: [] for rat in rats}
@@ -774,23 +778,25 @@ def run_multi_vehicle_loop(
             ]
             vehicle_times_s = [t_ms / 1000.0 for t_ms in vehicle_times_ms]
 
+            # Each vehicle's measurement for this step: perturbed once, reused by every phase
+            vehicle_states = [_perturb_state(base_state, vehicle_rngs[v]) for v in range(num_vehicles)]
+            # Model input windows per RAT (steps before this one), for retraining samples
+            vehicle_windows: List[Dict[str, Optional[np.ndarray]]] = [{} for _ in range(num_vehicles)]
+
             for v in range(num_vehicles):
-                state_v = _perturb_state(base_state, vehicle_rngs[v])
+                state_v = vehicle_states[v]
+                # Decide from this vehicle's own observations, up to the previous step
+                api.set_context(vehicle_contexts[v])
 
                 if enable_pqos:
-                    # Swap in this vehicle's history (copy lists so api doesn't
-                    # hold a reference into vehicle_histories)
-                    api._history = {
-                        k: list(v_list) for k, v_list in vehicle_histories[v].items()
-                    }
-
                     queue_ctx = vehicle_qsims[v].get_queue_context()
                     decision = api.select_rat(state_v, queue_ctx)
-
-                    # Save updated history back (new dict, decoupled from api)
-                    vehicle_histories[v] = api._history
+                    vehicle_windows[v] = {rat: api.input_window(rat) for rat in rats}
                 else:
                     decision = api.select_rat_opportunistic(state_v)
+
+                # Keep the updated sticky RAT (history is unchanged by deciding)
+                vehicle_contexts[v] = api.get_context()
 
                 if decision.selected_rat == RATType.UNAVAILABLE:
                     continue
@@ -832,18 +838,13 @@ def run_multi_vehicle_loop(
                 for v in range(num_vehicles):
                     if vehicle_rats[v] not in overloaded_rats:
                         continue
-                    state_v = _perturb_state(base_state, vehicle_rngs[v])
-                    # Copy history into api for re-selection. select_rat will
-                    # append to api._history, but we discard those changes to
-                    # avoid double-appending (Pass 1 already appended).
-                    api._history = {
-                        k: list(v_list) for k, v_list in vehicle_histories[v].items()
-                    }
+                    state_v = vehicle_states[v]
+                    # Re-select from the same observations as Pass 1
+                    api.set_context(vehicle_contexts[v])
                     queue_ctx = vehicle_qsims[v].get_queue_context()
                     new_decision = api.select_rat(
                         state_v, queue_ctx, contention_context=contention_ctx,
                     )
-                    # Discard history changes from re-selection (keep Pass 1 history)
                     if new_decision.selected_rat == RATType.UNAVAILABLE:
                         continue
                     decisions[v] = new_decision
@@ -889,7 +890,7 @@ def run_multi_vehicle_loop(
                 pkt_decision = pkt_decisions[v]
                 packet_size = pkt_decision.packet_size_bytes
                 n_on_rat = vehicles_per_rat[selected_rat]
-                state_v = _perturb_state(base_state, vehicle_rngs[v])
+                state_v = vehicle_states[v]
 
                 # Track switches
                 if vehicle_prev_rat[v] is not None and selected_rat != vehicle_prev_rat[v]:
@@ -928,9 +929,9 @@ def run_multi_vehicle_loop(
 
                 # Build retraining sequence from this vehicle's history
                 if enable_pqos:
-                    history = vehicle_histories[v].get(rat_str, [])
-                    if len(history) >= TIMESTEPS:
-                        seq = np.array(history[-TIMESTEPS:])
+                    window = vehicle_windows[v].get(rat_str)
+                    if window is not None:
+                        seq = window[0]
                         actual_lat = _actual_latency(state_v, selected_rat)
                         actual_pdr_val = _actual_pdr(state_v, selected_rat)
 
@@ -964,8 +965,16 @@ def run_multi_vehicle_loop(
                     "dtmc_state": dtmc_state,
                     "dtmc_size": dtmc_size,
                     "confidence": round(decision.confidence, 4),
+                "fallback": decision.fallback,
                     "queue_depth": vehicle_qsims[v].queue_depth,
                 })
+
+            # Record this step's measurements for every vehicle (UNAVAILABLE included),
+            # only after all decisions for the step were made
+            for v in range(num_vehicles):
+                api.set_context(vehicle_contexts[v])
+                api.observe(vehicle_states[v])
+                vehicle_contexts[v] = api.get_context()
 
             # Phase 4: Check retraining threshold (global, per RAT)
             if not enable_pqos:
@@ -1100,6 +1109,7 @@ def run_multi_vehicle_loop(
         "successful_bytes": successful_bytes,
         "throughput_bytes_per_s": round(throughput_bps, 4),
         "total_rat_switches": sum(vehicle_switches),
+        "fallback_steps": int(log_df["fallback"].sum()) if len(log_df) else 0,
         "retrain_cycles_total": sum(retrain_count.values()),
         **{f"retrain_{k}": v for k, v in retrain_count.items()},
         **{f"rat_{k}": v for k, v in rat_dist.items()},

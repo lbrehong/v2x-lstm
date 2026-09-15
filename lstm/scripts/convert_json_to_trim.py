@@ -32,14 +32,24 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
+import io
+import json
 
 import numpy as np
 import pandas as pd
 
 from config import LATENCY_BOUNDS
 
-# Max gap between a ping and the radio sample joined onto it
-RADIO_MATCH_TOLERANCE_MS = 2000
+# Max gap between a ping and the radio sample joined onto it. Beyond it the ping
+# gets no SINR/RSRP (never a stale value carried over from minutes away).
+RADIO_MATCH_TOLERANCE_MS = 10_000
+
+# 5G PDR source. False: trim_5g.csv has no pdr column, so matching/training compute a
+# rolling count of received pings, the only definition every dataset supports (cohda's
+# matched tours have no per-ping packet_loss). True: 1 - packet_loss of each ping.
+FIVEG_PDR_FROM_PACKET_LOSS = False
+
+_INT64_MAX = 2**63 - 1
 
 
 # ---------------------------------------------------------------------------
@@ -47,8 +57,33 @@ RADIO_MATCH_TOLERANCE_MS = 2000
 # ---------------------------------------------------------------------------
 
 def _load_df_json(path: str) -> pd.DataFrame:
-    """Load a pandas split-orient JSON file."""
-    return pd.read_json(path, orient="split")
+    """
+    Load a pandas split-orient JSON file.
+
+    Some exports hold integers beyond int64 (e.g. 2^64 counter sentinels in
+    cohda's df_radio.json), which pandas' JSON reader rejects. Those values are
+    replaced with NaN and the file is parsed again with the same type inference.
+    """
+    try:
+        return pd.read_json(path, orient="split")
+    except ValueError as err:
+        if "too big" not in str(err):
+            raise
+
+    with open(path) as f:
+        raw = json.load(f)
+    n_fixed = 0
+
+    def clean(value):
+        nonlocal n_fixed
+        if isinstance(value, int) and not isinstance(value, bool) and abs(value) > _INT64_MAX:
+            n_fixed += 1
+            return None
+        return value
+
+    raw["data"] = [[clean(v) for v in row] for row in raw["data"]]
+    print(f"  {os.path.basename(path)}: {n_fixed} out-of-range integer value(s) set to NaN")
+    return pd.read_json(io.StringIO(json.dumps(raw)), orient="split")
 
 
 def _ts_to_epoch_ms(ts_series: pd.Series) -> pd.Series:
@@ -95,7 +130,8 @@ def _merge_radio(df: pd.DataFrame, radio: pd.DataFrame) -> pd.DataFrame:
     Both files carry the datalake time, so each ping takes the nearest radio
     sample of its UE. The UE log has no SINR/RSRP: sinr takes pusch_snr and
     rsrp takes -ul_path_loss as a proxy. Pings without a radio sample within
-    RADIO_MATCH_TOLERANCE_MS are forward/back-filled from the same IP.
+    RADIO_MATCH_TOLERANCE_MS keep NaN (e.g. when the radio log stops before the
+    pings), so they are treated as missing instead of reusing old values.
     """
     df = df.copy()
     df["_order"] = np.arange(len(df))
@@ -117,11 +153,10 @@ def _merge_radio(df: pd.DataFrame, radio: pd.DataFrame) -> pd.DataFrame:
         ))
 
     merged = pd.concat(parts).sort_values("_order")
-    print(f"  5G radio metrics matched for {merged['pusch_snr'].notna().mean():.1%} of pings")
+    print(f"  5G radio metrics matched for {merged['pusch_snr'].notna().mean():.1%} of pings "
+          f"(within {RADIO_MATCH_TOLERANCE_MS / 1000:.0f} s)")
     merged["sinr"] = merged["pusch_snr"]
     merged["rsrp"] = -merged["ul_path_loss"]
-    merged[["sinr", "rsrp"]] = merged.groupby("ip")[["sinr", "rsrp"]].transform(
-        lambda s: s.ffill().bfill())
     return merged.drop(columns=["_order", "_ts_ms", "pusch_snr", "ul_path_loss"]).reset_index(drop=True)
 
 
@@ -131,9 +166,10 @@ def convert_5g(
 ) -> pd.DataFrame | None:
     """Convert df_ping.json (+ df_radio.json or df_gps.json) -> trim_5g format.
 
-    PDR comes from each ping's packet_loss (share of its probes lost) when
-    df_ping.json has that column. SINR/RSRP come from df_radio.json when
-    present (see _merge_radio), otherwise from df_gps.json.
+    PDR comes from each ping's packet_loss (share of its probes lost) only when
+    FIVEG_PDR_FROM_PACKET_LOSS is set; by default no pdr column is written and
+    a rolling count of received pings is computed downstream. SINR/RSRP come
+    from df_radio.json when present (see _merge_radio), otherwise from df_gps.json.
     """
     ping_path = os.path.join(input_dir, "df_ping.json")
     if not os.path.exists(ping_path):
@@ -164,8 +200,8 @@ def convert_5g(
         df["tx_latitude"] = np.nan
         df["tx_longitude"] = np.nan
 
-    # PDR from the ping's own probe loss
-    if "packet_loss" in df.columns:
+    # PDR from the ping's own probe loss (off by default, see FIVEG_PDR_FROM_PACKET_LOSS)
+    if FIVEG_PDR_FROM_PACKET_LOSS and "packet_loss" in df.columns:
         df["pdr"] = 1.0 - pd.to_numeric(df["packet_loss"], errors="coerce") / 100.0
 
     # SINR / RSRP — prefer df_radio.json
@@ -233,8 +269,12 @@ def convert_pc5(input_dir: str) -> pd.DataFrame | None:
     else:
         df["tx_seq_num"] = range(len(df))
 
-    # Timestamp: prefer tx_timestamp (us) column
-    if "tx_timestamp (us)" in df.columns:
+    # Timestamp on the 5G pings' clock: ingest_logs' local `timestamp` when present
+    # (raw tx epochs are UTC, 1 h off the local ping time); cohda exports have no such
+    # column and their tx epoch already shares the ping clock.
+    if "timestamp" in df.columns and pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["tx_timestamp_ms"] = _ts_to_epoch_ms(df["timestamp"])
+    elif "tx_timestamp (us)" in df.columns:
         df["tx_timestamp_ms"] = df["tx_timestamp (us)"].astype(float) / 1000.0
     elif pd.api.types.is_datetime64_any_dtype(df.get("timestamp")):
         df["tx_timestamp_ms"] = _ts_to_epoch_ms(df["timestamp"])
@@ -251,6 +291,14 @@ def convert_pc5(input_dir: str) -> pd.DataFrame | None:
     else:
         df["tx_latitude"] = np.nan
         df["tx_longitude"] = np.nan
+
+    # Rows without a transmitter position can't be placed or matched. Counting them
+    # would also inflate the rolling PDR when a second transmitter logs no GPS
+    # (cohda's matched tours), so PDR describes positioned transmissions only.
+    n_before = len(df)
+    df = df[df["tx_latitude"].notna() & df["tx_longitude"].notna()].copy()
+    if len(df) < n_before:
+        print(f"  PC5: dropped {n_before - len(df)} of {n_before} rows without a transmitter position")
 
     # Latency
     if "latency (ms)" in df.columns:
@@ -327,6 +375,71 @@ def convert_dsrc(input_dir: str) -> pd.DataFrame | None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _has_df_json(path: str) -> bool:
+    return any(os.path.exists(os.path.join(path, name)) for name in ("df_ping.json", "df_pc5.json"))
+
+
+def _subdirs(path: str) -> list[str]:
+    return sorted(os.path.join(path, n) for n in os.listdir(path) if os.path.isdir(os.path.join(path, n)))
+
+
+def find_tour_dirs(root: str, exclude: str | None = None) -> list[str]:
+    """
+    Tour folders holding df_*.json exports under root.
+
+    Looks at root's subfolders first (e.g. matched/combined -> Tour1, Tour2, ...),
+    then one level deeper (e.g. matched -> combined/Tour1, ...). Folders inside
+    `exclude` (typically the output folder) are ignored.
+    """
+    excluded = os.path.abspath(exclude) if exclude else None
+
+    def keep(path):
+        path = os.path.abspath(path)
+        return not excluded or os.path.commonpath([path, excluded]) != excluded
+
+    tours = [d for d in _subdirs(root) if keep(d) and _has_df_json(d)]
+    if not tours:
+        tours = [g for c in _subdirs(root) if keep(c) for g in _subdirs(c) if keep(g) and _has_df_json(g)]
+    return tours
+
+
+def convert_tours(root: str, output_dir: str, gps_path: str | None = None) -> list[str]:
+    """
+    Convert every tour's df_*.json under root, then merge the tours' trim_*.csv.
+
+    Each tour is converted on its own (its own df_gps.json / df_radio.json) into
+    output_dir/<tour>/, and the per-RAT files are concatenated in time order into
+    output_dir/trim_<rat>.csv. Cohda's own top-level merged df_*.json are not used.
+
+    Returns:
+        List of converted tour folders
+
+    Raises:
+        FileNotFoundError: If no tour folder with df_*.json is found
+    """
+    tours = find_tour_dirs(root, exclude=output_dir)
+    if not tours:
+        raise FileNotFoundError(f"No tour folders with df_ping.json/df_pc5.json under {root}")
+
+    parts: dict[str, list[pd.DataFrame]] = {}
+    for tour in tours:
+        tour_out = os.path.join(output_dir, os.path.relpath(tour, root).replace(os.sep, "_"))
+        print(f"Converting {tour} -> {tour_out}")
+        convert_all(tour, tour_out, gps_path)
+        for rat in ("5g", "pc5", "dsrc"):
+            path = os.path.join(tour_out, f"trim_{rat}.csv")
+            if os.path.exists(path):
+                parts.setdefault(rat, []).append(pd.read_csv(path))
+
+    print(f"Merging {len(tours)} tours into {output_dir}")
+    for rat, frames in parts.items():
+        merged = pd.concat(frames, ignore_index=True)
+        merged = merged.sort_values("tx_timestamp_ms", kind="stable").reset_index(drop=True)
+        merged.to_csv(os.path.join(output_dir, f"trim_{rat}.csv"), index=False)
+        print(f"  trim_{rat}.csv: {len(merged)} rows from {len(frames)} tour(s)")
+    return tours
+
+
 def convert_all(input_dir: str, output_dir: str, gps_path: str | None = None):
     """Convert all available df_*.json files to trim_*.csv."""
     os.makedirs(output_dir, exist_ok=True)
@@ -369,13 +482,22 @@ def main():
     parser = argparse.ArgumentParser(
         description="Convert df_*.json (pandas split-orient) to trim_*.csv"
     )
-    parser.add_argument("--input", type=str, required=True,
+    parser.add_argument("--input", type=str, default=None,
                         help="Directory containing df_ping.json, df_pc5.json, etc.")
+    parser.add_argument("--tours", type=str, default=None,
+                        help="Folder of tour subfolders with df_*.json (e.g. matched/combined): "
+                             "each tour is converted, then merged (default output: <tours>/trimmed)")
     parser.add_argument("--output", type=str, default=None,
                         help="Output directory for trim_*.csv (default: same as --input)")
     parser.add_argument("--gps", type=str, default=None,
                         help="Path to df_gps.json for SINR/RSRP (auto-detected if in --input)")
     args = parser.parse_args()
+
+    if bool(args.input) == bool(args.tours):
+        parser.error("provide exactly one of --input or --tours")
+    if args.tours:
+        convert_tours(args.tours, args.output or os.path.join(args.tours, "trimmed"), gps_path=args.gps)
+        return
 
     output_dir = args.output or args.input
     print(f"Converting df_*.json from {args.input}")

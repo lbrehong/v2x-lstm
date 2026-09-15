@@ -386,6 +386,17 @@ class TestRATDecision:
         assert restored.predicted_pdr == original.predicted_pdr
         assert restored.model_type == original.model_type
 
+    def test_rat_decision_fallback_flag_roundtrip(self, sample_rat_decision):
+        """The fallback flag defaults to False and survives to_dict/from_dict, also as CSV text."""
+        assert sample_rat_decision.fallback is False
+        assert sample_rat_decision.to_dict()["fallback"] is False
+
+        sample_rat_decision.fallback = True
+        d = sample_rat_decision.to_dict()
+        assert RATDecision.from_dict(d).fallback is True
+        assert RATDecision.from_dict({**d, "fallback": "True"}).fallback is True
+        assert RATDecision.from_dict({**d, "fallback": "False"}).fallback is False
+
     def test_rat_decision_roundtrip(self, sample_rat_decision):
         """to_dict -> from_dict should preserve all values."""
         original = sample_rat_decision

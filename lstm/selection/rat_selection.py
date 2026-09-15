@@ -26,14 +26,14 @@ from tabulate import tabulate
 import folium
 
 from config import (
-    MODEL_DIR, OUTPUT_DIR, TIMESTEPS, TARGET_COLS, RATS, MODELS,
-    ALL_RATS, DEFAULT_RATS, validate_rats,
+    MODEL_DIR, OUTPUT_DIR, TIMESTEPS, TARGET_COLS, RATS, MODELS, FEATURE_COLS,
+    ALL_RATS, DEFAULT_RATS, LSTM_FALLBACK_RAT, validate_rats,
     PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS,
     create_gps_scaler, create_latency_scaler,
 )
 from utils import get_latest_model
 from learning.model import automatic_train_torch, load_torch_model, predict_torch
-from learning.data_preprocessing import preprocess_lstm_input
+from learning.data_preprocessing import preprocess_lstm_input, normalize_features
 from selection.file_integration import process_batch
 
 # Initialize scalers for coordinate and latency transformations
@@ -53,42 +53,84 @@ def grab_gps(df):
     return dfr
 
 
-def get_predictions(model, rat, gps_data):
-    """Get latency and PDR predictions for GPS data."""
-    print(f"Prediction over {len(gps_data)} GPS points")
+def build_prediction_windows(rat, df, seq_length=TIMESTEPS):
+    """
+    Build model input windows from measured data, aligned with training.
 
-    gps_data_scaled = gps_scaler.transform(gps_data)
-    sequence_length = 10
-    num_features = 4 if rat == "pc5" else 6
+    Training pairs rows j..j+seq_length-1 with the target at row j+seq_length,
+    so the window for row i is rows i-seq_length .. i-1 (row i is never an input).
 
-    input_sequences = []
+    Feature column `c` of FEATURE_COLS[rat] is read from `c_<rat>` when present
+    (super_merged naming, e.g. latency_ms_5g), else from `c` (e.g. sinr, tx_latitude).
 
-    for i in range(len(gps_data_scaled)):
-        past_points = gps_data_scaled[max(0, i - sequence_length + 1):i + 1]
-        past_points_full = np.hstack((past_points, np.zeros((past_points.shape[0], num_features - past_points.shape[1]))))
+    Args:
+        rat: RAT type identifier ('5g', 'pc5', or 'dsrc')
+        df: DataFrame of measurements, one row per time step
+        seq_length: Window length (default: TIMESTEPS)
 
-        if len(past_points) < sequence_length:
-            padding = np.zeros((sequence_length - len(past_points), num_features))
-            sequence = np.vstack((padding, past_points_full))
-        else:
-            sequence = past_points_full
+    Returns:
+        Tuple of (windows, valid) where windows has shape
+        (valid.sum(), seq_length, n_features) and valid is a boolean array over
+        df rows. Rows without seq_length prior rows, or whose window contains a
+        missing value, are invalid.
 
-        input_sequences.append(sequence)
+    Raises:
+        ValueError: If a required feature column is missing from df
+    """
+    feature_cols = FEATURE_COLS[rat]
+    source = {c: f"{c}_{rat}" if f"{c}_{rat}" in df.columns else c for c in feature_cols}
+    missing = [src for src in source.values() if src not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns for {rat} predictions: {missing}")
 
-    input_sequences = np.array(input_sequences)
+    raw = pd.DataFrame({c: df[src].to_numpy() for c, src in source.items()})
+    features = normalize_features(raw, rat).to_numpy(dtype=float)
 
-    print("Input Sequences Shape:", input_sequences.shape)
-    if input_sequences.shape[0] == 0:
-        raise ValueError("Error: No input sequences generated. Check GPS preprocessing.")
+    n = len(features)
+    valid = np.zeros(n, dtype=bool)
+    if n <= seq_length:
+        return np.empty((0, seq_length, len(feature_cols))), valid
 
-    pred_latency, pred_pdr = predict_torch(model, input_sequences)
-    pred_latency = np.clip(pred_latency, 0.0, 1.0)
-    latency = latency_scalers[rat].inverse_transform(np.array(pred_latency).reshape(-1, 1)).flatten()
-    pdr = np.clip(pred_pdr, 0.0, 1.0)
+    # Number of rows with a NaN among the seq_length rows preceding each row
+    bad = np.concatenate(([0], np.cumsum(np.isnan(features).any(axis=1))))
+    rows = np.arange(seq_length, n)
+    valid[rows] = (bad[rows] - bad[rows - seq_length]) == 0
 
-    print("First few latency predictions:", latency[:5])
-    print("First few PDR predictions:", pdr[:5])
+    # Window k covers rows k..k+seq_length-1 and predicts row k+seq_length
+    all_windows = np.lib.stride_tricks.sliding_window_view(features, seq_length, axis=0)
+    windows = all_windows[np.flatnonzero(valid) - seq_length].transpose(0, 2, 1)
+    return np.ascontiguousarray(windows), valid
 
+
+def get_predictions(model, rat, df):
+    """
+    Predict latency and PDR for every row of a measurement DataFrame.
+
+    Inputs are built from the measured features of the preceding rows, scaled
+    exactly as in training (see build_prediction_windows). Rows without a full
+    window of measurements get NaN predictions, which select_best_rat treats as
+    the RAT being unavailable.
+
+    Args:
+        model: Trained PyTorch model for this RAT
+        rat: RAT type identifier ('5g', 'pc5', or 'dsrc')
+        df: Super-merged DataFrame (one row per GPS point, in time order)
+
+    Returns:
+        Tuple of (latency_ms, pdr) arrays aligned with df rows
+    """
+    windows, valid = build_prediction_windows(rat, df)
+    latency = np.full(len(df), np.nan)
+    pdr = np.full(len(df), np.nan)
+    print(f"{rat}: predicting {valid.sum()}/{len(df)} rows "
+          f"({len(df) - valid.sum()} without a full measurement window)")
+    if not valid.any():
+        return latency, pdr
+
+    pred_latency, pred_pdr = predict_torch(model, windows)
+    pred_latency = np.clip(np.asarray(pred_latency, dtype=float).reshape(-1, 1), 0.0, 1.0)
+    latency[valid] = latency_scalers[rat].inverse_transform(pred_latency).ravel()
+    pdr[valid] = np.clip(np.asarray(pred_pdr, dtype=float).ravel(), 0.0, 1.0)
     return latency, pdr
 
 
@@ -198,19 +240,28 @@ def select_best_rat(row, model_type, rats=DEFAULT_RATS):
         rats: RATs eligible for selection (default: DEFAULT_RATS)
 
     Returns:
-        String identifier of selected RAT (one of `rats`) or 'NaN'
+        String identifier of selected RAT (one of `rats`), the fallback RAT
+        (LSTM_FALLBACK_RAT) when the model cannot decide, or 'NaN'
     """
+    return _select_best_rat(row, model_type, rats)[0]
+
+
+def _select_best_rat(row, model_type, rats=DEFAULT_RATS):
+    """select_best_rat's decision, plus whether the fallback RAT was used."""
+    rats = validate_rats(rats)
+    fallback_active = LSTM_FALLBACK_RAT is not None and LSTM_FALLBACK_RAT in rats
     # A RAT without a model or measurements (e.g. no DSRC data) has no columns -> NaN, filtered below
-    options = [
+    candidates = [
         (rat, row.get(f"pred_latency_ms_{rat}_{model_type}", np.nan),
          row.get(f"pred_pdr_{rat}_{model_type}", np.nan), row.get(f"pdr_{rat}", np.nan))
-        for rat in validate_rats(rats)
+        for rat in rats
     ]
 
     # Filter out options with NaN predictions
-    options = [opt for opt in options if pd.notna(opt[1]) and pd.notna(opt[2]) and pd.notna(opt[3])]
+    options = [opt for opt in candidates if pd.notna(opt[1]) and pd.notna(opt[2]) and pd.notna(opt[3])]
     if not options:
-        return "NaN"
+        # No RAT has both a prediction and a last measurement: the model cannot decide
+        return (LSTM_FALLBACK_RAT, True) if fallback_active else ("NaN", False)
 
     # Filter by PDR reliability threshold
     valid_options = [opt for opt in options if opt[2] >= PDR_RELIABILITY_THRESHOLD]
@@ -237,7 +288,56 @@ def select_best_rat(row, model_type, rats=DEFAULT_RATS):
         priority = {"5g": 0, "pc5": 1, "dsrc": 2}
         best_rat = min(tied, key=lambda opt: priority.get(opt[0], 99))[0]
 
-    return best_rat
+    if best_rat == "NaN" and fallback_active and not any(opt[0] == LSTM_FALLBACK_RAT for opt in options):
+        # Every usable RAT is unavailable, and the fallback RAT has no prediction to judge it by
+        return LSTM_FALLBACK_RAT, True
+    return best_rat, False
+
+
+def lstm_fallback_mask(df, model_type, rats=DEFAULT_RATS):
+    """
+    Rows where select_best_rat used the fallback RAT (same decision logic, so exact).
+
+    That is: no RAT has both a prediction and a last measured PDR, or every usable
+    RAT is unavailable while the fallback RAT has no prediction. Pass the same
+    (lagged) frame given to select_best_rat.
+
+    Args:
+        df: DataFrame with pred_latency_ms_<rat>_<model>, pred_pdr_<rat>_<model>
+            and pdr_<rat> columns
+        model_type: Model architecture name (lstm, gru, rnn)
+        rats: Active RATs
+
+    Returns:
+        Boolean Series (all False when no fallback RAT is configured or active)
+    """
+    rats = validate_rats(rats)
+    if df.empty:
+        return pd.Series(False, index=df.index, dtype=bool)
+    return df.apply(lambda row: _select_best_rat(row, model_type, rats)[1], axis=1).astype(bool)
+
+
+def lagged_measurements(df, rats=DEFAULT_RATS):
+    """
+    Copy of df where each row holds the previous row's measured latency/PDR.
+
+    Decisions for row i must only use data observed up to row i-1. Applying
+    select_best_rat / opportunistic_best_rat to this frame enforces that; the
+    first row has no observation (NaN). Prediction columns are left unchanged.
+
+    Args:
+        df: Super-merged DataFrame in time order
+        rats: RATs whose latency_ms_<rat> / pdr_<rat> columns are shifted
+
+    Returns:
+        New DataFrame with the measurement columns shifted by one row
+    """
+    lagged = df.copy()
+    for rat in validate_rats(rats):
+        for col in (f"latency_ms_{rat}", f"pdr_{rat}"):
+            if col in lagged.columns:
+                lagged[col] = df[col].shift(1)
+    return lagged
 
 
 def opportunistic_best_rat(df, rats=DEFAULT_RATS):
@@ -642,9 +742,7 @@ if __name__ == "__main__":
             print("_ Merging into the super-CSV.")
             super_df = merge_csvs(INPUT, rats=ACTIVE_RATS)
 
-            # Predict directly on super_merged GPS — no intermediate files
-            gps_data = super_df[["tx_latitude", "tx_longitude"]].copy()
-
+            # Predict from the measured history in super_merged — no intermediate files
             for mt in model_types:
                 for rat in ACTIVE_RATS:
                     model_path = get_latest_model(mt, rat)
@@ -652,17 +750,20 @@ if __name__ == "__main__":
                         print(f"  Warning: no {mt} model found for {rat}, skipping")
                         continue
                     model_f = load_torch_model(model_path)
-                    latency, pdr = get_predictions(model_f, rat, gps_data)
+                    latency, pdr = get_predictions(model_f, rat, super_df)
                     super_df[f"pred_latency_ms_{rat}_{mt}"] = latency
                     super_df[f"pred_pdr_{rat}_{mt}"] = pdr
                     print(f"  {rat}: {mt} predictions done.")
 
             print("_ Predictions added.")
             print("_ Sending to the selection algorithm.")
+            # Decide row i from row i-1's measurements (no lookahead)
+            observed = lagged_measurements(super_df, ACTIVE_RATS)
             for mt in model_types:
-                super_df[f"Best_RAT_{mt}"] = super_df.apply(select_best_rat, args=(mt, ACTIVE_RATS), axis=1)
+                super_df[f"Best_RAT_{mt}"] = observed.apply(select_best_rat, args=(mt, ACTIVE_RATS), axis=1)
+                super_df[f"Fallback_{mt}"] = lstm_fallback_mask(observed, mt, ACTIVE_RATS)
             print("_ Adding opportunistic algorithm.")
-            super_df = opportunistic_best_rat(super_df, rats=ACTIVE_RATS)
+            super_df["Best_RAT_opp"] = opportunistic_best_rat(observed, rats=ACTIVE_RATS)["Best_RAT_opp"]
             print("_ Algorithms done.")
             out_path = os.path.join(INPUT, "bestRAT_super.csv")
             print(f"_ Saving. {out_path}")

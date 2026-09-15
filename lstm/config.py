@@ -63,6 +63,9 @@ PDR_WINDOW = 10  # in seconds
 PDR_RELIABILITY_THRESHOLD = 0.99  # Minimum PDR for reliable transmission
 PDR_AVAILABILITY_THRESHOLD = 0.1  # Minimum PDR to consider RAT available
 LATENCY_TIE_MARGIN_MS = 1.0  # Latency difference to trigger tie-breaking
+# RAT used when the model has no prediction for any RAT (no full measurement window,
+# e.g. the first steps or missing 5G radio data). None = no fallback (step unavailable).
+LSTM_FALLBACK_RAT = "5g"
 
 # =============================================================================
 # Packet Size Bounds (for queue simulator integration)

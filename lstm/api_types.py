@@ -212,6 +212,7 @@ class RATDecision:
         all_predictions: Predictions for all RATs {RAT: (latency, pdr)}
         recommended_max_packet_size: Optional packet size recommendation
         model_type: Model architecture used (lstm, gru, rnn)
+        fallback: True when the model had no prediction and the fallback RAT was chosen
     """
     selected_rat: RATType
     confidence: float  # 0.0 to 1.0
@@ -220,6 +221,7 @@ class RATDecision:
     all_predictions: Dict[RATType, Tuple[float, float]]  # {RAT: (latency, pdr)}
     recommended_max_packet_size: Optional[int] = None
     model_type: str = "lstm"
+    fallback: bool = False
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for CSV/file output."""
@@ -229,6 +231,7 @@ class RATDecision:
             "pred_latency": self.predicted_latency_ms,
             "pred_pdr": self.predicted_pdr,
             "model_type": self.model_type,
+            "fallback": self.fallback,
         }
         # Add per-RAT predictions
         for rat, (lat, pdr) in self.all_predictions.items():
@@ -256,6 +259,7 @@ class RATDecision:
             all_predictions=all_predictions,
             recommended_max_packet_size=d.get("recommended_max_packet_size"),
             model_type=d.get("model_type", "lstm"),
+            fallback=str(d.get("fallback", False)).lower() in ("true", "1"),
         )
 
 

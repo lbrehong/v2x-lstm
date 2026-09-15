@@ -73,6 +73,7 @@ def process_batch(
 
         # Get RAT decision
         decision = api.select_rat(state)
+        api.observe(state)  # record the step only after deciding for it
 
         # Build result row
         result = {
@@ -200,6 +201,7 @@ class FileExchangeCoordinator:
 
                 # Make decision
                 decision = self.api.select_rat(state, queue_context)
+                self.api.observe(state)  # record the step only after deciding for it
 
                 # Write decision
                 self._write_rat_decision(decision)
@@ -442,6 +444,7 @@ class AppendOnlyLogger:
         for step, row in df.iterrows():
             state = _row_to_network_state(row)
             decision = self.api.select_rat(state)
+            self.api.observe(state)  # record the step only after deciding for it
 
             # Build log entry
             entry = {

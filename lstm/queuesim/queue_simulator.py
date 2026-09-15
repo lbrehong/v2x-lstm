@@ -312,6 +312,9 @@ class QueueSimulator:
         if window_pdr is not None:
             # Use actual PDR from recent transmissions
             pdr_for_decision = window_pdr
+        elif pd.isna(rat_decision.predicted_pdr):
+            # No history and no prediction (e.g. a fallback decision): nothing to act on
+            pdr_for_decision = None
         else:
             # Not enough history - use predicted PDR with size correction
             predicted_pdr = rat_decision.predicted_pdr
@@ -320,8 +323,11 @@ class QueueSimulator:
                 predicted_pdr, self.base_packet_size, current_size, self.correction_exponent
             )
 
-        # DTMC transition based on PDR
-        new_size = dtmc.transition(pdr_for_decision, self.metrics.total_packets)
+        # DTMC transition based on PDR; keep the current size when PDR is unknown
+        if pdr_for_decision is None:
+            new_size = dtmc.current_size
+        else:
+            new_size = dtmc.transition(pdr_for_decision, self.metrics.total_packets)
 
         # Enforce PHY-layer max packet size
         if self.enforce_phy_limits:
@@ -464,7 +470,9 @@ class IntegratedQueueSimulator:
         """Get RAT decision from API or pre-computed data."""
         if self.rat_api is not None:
             queue_context = self.queue_sim.get_queue_context()
-            return self.rat_api.select_rat(state, queue_context)
+            decision = self.rat_api.select_rat(state, queue_context)
+            self.rat_api.observe(state)  # record the step only after deciding for it
+            return decision
 
         # Fallback: use data from DataFrame if available
         if self.network_data is not None and self.data_index > 0:

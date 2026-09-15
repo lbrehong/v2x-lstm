@@ -66,6 +66,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     data = p.add_argument_group("Data sources (at least one required)")
     data.add_argument("--raw_data", default="",
                       help="Raw log folder (triggers trimming step)")
+    data.add_argument("--json_tours", default="",
+                      help="Folder of tours holding cohda df_*.json exports without raw logs "
+                           "(e.g. matched/combined); converted to trimmed CSVs in --data "
+                           "(default: <json_tours>/trimmed)")
     data.add_argument("--data", default="",
                       help="Trimmed CSV folder (training + matching). "
                            "When used with --raw_data, trimmed output is "
@@ -118,8 +122,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     args = p.parse_args(argv)
 
-    if not any([args.raw_data, args.data, args.npz, args.merged_csv]):
-        p.error("provide at least one of --raw_data, --data, --npz, or --merged_csv")
+    if not any([args.raw_data, args.json_tours, args.data, args.npz, args.merged_csv]):
+        p.error("provide at least one of --raw_data, --json_tours, --data, --npz, or --merged_csv")
+    if args.raw_data and args.json_tours:
+        p.error("--raw_data and --json_tours are alternative inputs; provide only one")
 
     args.rats = config.validate_rats(args.rats)
 
@@ -127,7 +133,18 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def stage_trim(args) -> None:
-    """Stage 1: Ingest raw logs into cohda-compatible df_*.json, then trimmed CSVs."""
+    """Stage 1: Ingest raw logs (or convert df_*.json tours) into trimmed CSVs."""
+    if args.json_tours and not args.skip_trimming:
+        banner("Stage 1: Converting df_*.json tours")
+        from scripts.convert_json_to_trim import convert_tours
+
+        out = args.data if args.data else os.path.join(args.json_tours, "trimmed")
+        print(f"Tours:          {args.json_tours}")
+        print(f"Trimmed output: {out}")
+        convert_tours(args.json_tours, out)
+        args.data = out
+        return
+
     if not args.raw_data or args.skip_trimming:
         print("-- Skipping trimming (no --raw_data or --skip_trimming)")
         return
@@ -161,13 +178,21 @@ def stage_match(args) -> None:
     all_present = all(
         Path(args.data, f).is_file() for f in required
     )
+    # Matched files built from older trimmed CSVs are stale (e.g. after re-conversion)
+    trimmed = [Path(args.data, f"trim_{rat}.csv") for rat in args.rats]
+    trimmed = [p for p in trimmed if p.is_file()]
+    up_to_date = all_present and (not trimmed or min(
+        Path(args.data, f).stat().st_mtime for f in required
+    ) >= max(p.stat().st_mtime for p in trimmed))
 
-    if not all_present:
+    if not up_to_date:
         banner("Stage 2: Matching cross-RAT data by GPS")
+        if all_present:
+            print("Matched CSVs are older than the trimmed CSVs, re-matching")
         from scripts.prepare_data import match_data
         match_data(args.data, rats=args.rats)
     else:
-        print(f"-- All matched CSVs present in {args.data}, skipping matching")
+        print(f"-- All matched CSVs present and up to date in {args.data}, skipping matching")
 
 
 def stage_train(args) -> None:
@@ -311,7 +336,7 @@ def stage_selection(args) -> None:
 
     banner("Stage 4: RAT selection on matched data")
 
-    from selection.rat_selection import (merge_csvs, get_predictions,
+    from selection.rat_selection import (merge_csvs, get_predictions, lagged_measurements, lstm_fallback_mask,
                                          select_best_rat, opportunistic_best_rat)
     from learning.model import load_torch_model
     from config import MODELS
@@ -327,9 +352,7 @@ def stage_selection(args) -> None:
     print("_ Merging into the super-CSV.")
     super_df = merge_csvs(INPUT, rats=args.rats)
 
-    # Predict directly on super_merged GPS — no intermediate files
-    gps_data = super_df[["tx_latitude", "tx_longitude"]].copy()
-
+    # Predict from the measured history in super_merged — no intermediate files
     for mt in model_types:
         for rat in args.rats:
             model_path = get_latest_model(mt, rat)
@@ -337,17 +360,20 @@ def stage_selection(args) -> None:
                 print(f"  Warning: no {mt} model found for {rat}, skipping")
                 continue
             model_f = load_torch_model(model_path)
-            latency, pdr = get_predictions(model_f, rat, gps_data)
+            latency, pdr = get_predictions(model_f, rat, super_df)
             super_df[f"pred_latency_ms_{rat}_{mt}"] = latency
             super_df[f"pred_pdr_{rat}_{mt}"] = pdr
             print(f"  {rat}: {mt} predictions done.")
 
     print("_ Predictions added.")
     print("_ Sending to the selection algorithm.")
+    # Decide row i from row i-1's measurements (no lookahead)
+    observed = lagged_measurements(super_df, args.rats)
     for mt in model_types:
-        super_df[f"Best_RAT_{mt}"] = super_df.apply(select_best_rat, args=(mt, args.rats), axis=1)
+        super_df[f"Best_RAT_{mt}"] = observed.apply(select_best_rat, args=(mt, args.rats), axis=1)
+        super_df[f"Fallback_{mt}"] = lstm_fallback_mask(observed, mt, args.rats)
     print("_ Adding opportunistic algorithm.")
-    super_df = opportunistic_best_rat(super_df, rats=args.rats)
+    super_df["Best_RAT_opp"] = opportunistic_best_rat(observed, rats=args.rats)["Best_RAT_opp"]
     print("_ Algorithms done.")
     out_path = os.path.join(INPUT, "bestRAT_super.csv")
     print(f"_ Saving. {out_path}")

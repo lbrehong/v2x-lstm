@@ -235,6 +235,27 @@ class TestQueueSimulatorPHY:
         assert packet_decision.packet_size_bytes <= max_phy
         assert packet_decision.packet_size_bytes == 4096
 
+    def test_fallback_decision_without_prediction_keeps_packet_size(self):
+        """A fallback decision has no predicted PDR (NaN): without history the size stays put."""
+        sim = QueueSimulator()
+        decision = RATDecision(
+            selected_rat=RATType.FiveG,
+            confidence=0.0,
+            predicted_latency_ms=float("nan"),
+            predicted_pdr=float("nan"),
+            all_predictions={},
+            fallback=True,
+        )
+        dtmc = sim.dtmc_sizers[RATType.FiveG]
+        size_before = dtmc.current_size
+        history_before = len(dtmc.history)
+
+        packet_decision = sim.decide_packet_size(decision, current_time=1.0)
+
+        # NaN must not be treated as a perfect PDR (it used to grow the packet)
+        assert packet_decision.packet_size_bytes == size_before
+        assert len(dtmc.history) == history_before  # no transition without any PDR
+
     def test_reset_clears_queue_bytes(self):
         """Reset should clear queue bytes."""
         sim = QueueSimulator()

@@ -47,6 +47,12 @@ class ConstantModel(nn.Module):
         return torch.full((batch, 1), self.latency), torch.full((batch, 1), self.pdr)
 
 
+def _observe(api, state, n=TIMESTEPS):
+    """Record the same measured state n times, filling the model input window."""
+    for _ in range(n):
+        api.observe(state)
+
+
 class TestRATSelectionAPIInitialization:
     """Tests for RATSelectionAPI initialization."""
 
@@ -228,7 +234,7 @@ class TestStateToFeatures:
             api_instance._state_to_features(sample_state, "wifi")
 
     def test_state_to_features_none_values(self, api_instance):
-        """None values should be converted to 0.0."""
+        """Missing measurements should be NaN, never zero-filled."""
         state = NetworkState(
             timestamp_ms=1699999999000,
             latitude=43.560,
@@ -237,9 +243,29 @@ class TestStateToFeatures:
         )
         features = api_instance._state_to_features(state, "5g")
 
-        # Latency should be normalized 0
-        # PDR should be 0
-        assert features[5] == 0.0  # PDR
+        assert np.isfinite(features[:2]).all()  # GPS is present
+        assert np.isnan(features[2:]).all()
+
+    @pytest.mark.parametrize("rat", ["5g", "pc5", "dsrc"])
+    def test_state_to_features_matches_training_scaling(self, sample_state, rat):
+        """Per-step features must equal the scaling used to build training data."""
+        import pandas as pd
+        from config import ALL_RATS
+        from learning.data_preprocessing import normalize_features
+        from selection.api import RATSelectionAPI
+
+        with patch('selection.api.get_latest_model', return_value=None):
+            api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
+
+        raw = {
+            "5g": dict(latency_ms=15.0, sinr=25.0, rsrp=-95.0, pdr=0.995),
+            "pc5": dict(latency_ms=10.0, pdr=0.99),
+            "dsrc": dict(rsrp_1=-85.0, rsrp_2=-90.0, latency_ms=12.0, pdr=0.98),
+        }[rat]
+        row = pd.DataFrame([{"tx_latitude": 43.560, "tx_longitude": 1.467, **raw}])
+
+        expected = normalize_features(row, rat).to_numpy()[0]
+        np.testing.assert_allclose(api._state_to_features(sample_state, rat), expected, rtol=1e-9)
 
 
 class TestSequenceBuilding:
@@ -265,42 +291,128 @@ class TestSequenceBuilding:
             pc5_pdr=0.99,
         )
 
-    def test_build_sequence_initial(self, api_instance, sample_state):
-        """First call should build sequence with padding."""
-        sequence = api_instance._build_sequence(sample_state, "pc5")
+    def test_input_window_none_until_full_history(self, api_instance, sample_state):
+        """No zero padding: a window exists only after TIMESTEPS observations."""
+        _observe(api_instance, sample_state, TIMESTEPS - 1)
+        assert api_instance.input_window("pc5") is None
 
-        assert sequence.shape == (1, TIMESTEPS, 4)  # PC5 has 4 features
-        # First TIMESTEPS-1 should be zeros (padding)
-        assert np.all(sequence[0, :TIMESTEPS-1, :] == 0)
+        api_instance.observe(sample_state)
+        window = api_instance.input_window("pc5")
+        assert window.shape == (1, TIMESTEPS, 4)  # PC5 has 4 features
+        assert np.isfinite(window).all()
 
-    def test_build_sequence_accumulates_history(self, api_instance, sample_state):
-        """Multiple calls should accumulate history."""
-        # Build 5 sequences
-        for i in range(5):
-            api_instance._build_sequence(sample_state, "pc5")
-
-        assert len(api_instance._history["pc5"]) == 5
-
-    def test_build_sequence_max_history(self, api_instance, sample_state):
-        """History should be capped at TIMESTEPS."""
-        # Build more than TIMESTEPS sequences
-        for i in range(TIMESTEPS + 5):
-            api_instance._build_sequence(sample_state, "pc5")
+    def test_observe_caps_history(self, api_instance, sample_state):
+        """History keeps only the last TIMESTEPS observations."""
+        _observe(api_instance, sample_state, TIMESTEPS + 5)
 
         assert len(api_instance._history["pc5"]) == TIMESTEPS
+        assert api_instance._last_state is sample_state
 
-    def test_build_sequence_shape_consistency(self, api_instance, sample_state):
-        """Sequence shape should be consistent regardless of history length."""
-        for i in range(TIMESTEPS + 3):
-            sequence = api_instance._build_sequence(sample_state, "pc5")
-            assert sequence.shape == (1, TIMESTEPS, 4)
+    def test_input_window_none_with_missing_measurements(self, api_instance, sample_state):
+        """A window containing a missing measurement gives no model input."""
+        _observe(api_instance, sample_state)  # sample_state has no 5G measurements
+
+        assert api_instance.input_window("pc5") is not None
+        assert api_instance.input_window("5g") is None
+
+    def test_deciding_does_not_record_the_decided_state(self, api_instance, sample_state):
+        """select_rat must not use or record the state it decides for (no lookahead)."""
+        api_instance.models = {"pc5": ConstantModel(latency=0.1, pdr=0.995)}
+        _observe(api_instance, sample_state)
+        window_before = api_instance.input_window("pc5").copy()
+
+        decided_state = NetworkState(
+            timestamp_ms=1700000000000, latitude=43.570, longitude=1.480,
+            pc5_latency_ms=90.0, pc5_pdr=0.0,
+        )
+        decision = api_instance.select_rat(decided_state)
+        api_instance.select_rat_opportunistic(decided_state)
+
+        np.testing.assert_array_equal(api_instance.input_window("pc5"), window_before)
+        assert api_instance._last_state is sample_state
+        assert decision.selected_rat == RATType.PC5
+
+        api_instance.observe(decided_state)
+        assert not np.array_equal(api_instance.input_window("pc5"), window_before)
+
+    def test_opportunistic_uses_last_observed_state(self, api_instance, sample_state):
+        """Opportunistic is UNAVAILABLE before any observation, then uses the last one."""
+        assert api_instance.select_rat_opportunistic(sample_state).selected_rat == RATType.UNAVAILABLE
+
+        api_instance.observe(sample_state)  # PC5 good, no 5G
+        pc5_down_now = NetworkState(
+            timestamp_ms=1700000000000, latitude=43.560, longitude=1.467,
+            pc5_latency_ms=10.0, pc5_pdr=0.0,
+        )
+        decision = api_instance.select_rat_opportunistic(pc5_down_now)
+
+        assert decision.selected_rat == RATType.PC5
+
+    def test_select_rat_falls_back_to_5g_without_predictions(self, api_instance, sample_state):
+        """No full measurement window for any RAT: 5G is chosen and flagged as a fallback."""
+        api_instance.models = {"pc5": ConstantModel(latency=0.1, pdr=0.995)}
+
+        decision = api_instance.select_rat(sample_state)  # nothing observed yet
+
+        assert decision.selected_rat == RATType.FiveG
+        assert decision.fallback is True
+        assert decision.confidence == 0.0
+        assert decision.all_predictions == {}
+        assert np.isnan(decision.predicted_pdr) and np.isnan(decision.predicted_latency_ms)
+
+        _observe(api_instance, sample_state)
+        decision = api_instance.select_rat(sample_state)
+        assert decision.fallback is False and decision.selected_rat == RATType.PC5
+
+    def test_no_fallback_when_5g_not_active(self, sample_state):
+        from selection.api import RATSelectionAPI
+
+        with patch('selection.api.get_latest_model', return_value=None):
+            api = RATSelectionAPI(model_type="lstm", rats=("pc5",))
+
+        decision = api.select_rat(sample_state)
+
+        assert decision.selected_rat == RATType.UNAVAILABLE
+        assert decision.fallback is False
+
+    def test_no_fallback_when_disabled(self, api_instance, sample_state, monkeypatch):
+        monkeypatch.setattr("selection.api.LSTM_FALLBACK_RAT", None)
+
+        assert api_instance.select_rat(sample_state).selected_rat == RATType.UNAVAILABLE
+
+    def test_select_rat_falls_back_when_predicted_rats_unavailable_and_5g_unpredicted(self, api_instance):
+        """PC5 predicted but unreliable and last seen down, 5G not predicted: 5G fallback."""
+        api_instance.models = {"pc5": ConstantModel(latency=0.1, pdr=0.5)}
+        pc5_down = NetworkState(
+            timestamp_ms=1699999999000, latitude=43.560, longitude=1.467,
+            pc5_latency_ms=10.0, pc5_pdr=0.01,
+        )
+        _observe(api_instance, pc5_down)
+
+        decision = api_instance.select_rat(pc5_down)
+
+        assert decision.selected_rat == RATType.FiveG
+        assert decision.fallback is True
+        assert RATType.PC5 in decision.all_predictions  # the PC5 prediction is still reported
+
+    def test_context_round_trip(self, api_instance, sample_state):
+        """get_context/set_context restore history, last state and sticky RAT without aliasing."""
+        _observe(api_instance, sample_state, 3)
+        api_instance._previous_rat = RATType.PC5
+        context = api_instance.get_context()
+
+        _observe(api_instance, sample_state, 5)
+        api_instance._previous_rat = RATType.FiveG
+        api_instance.set_context(context)
+
+        assert len(api_instance._history["pc5"]) == 3
+        assert api_instance._previous_rat == RATType.PC5
+        api_instance.observe(sample_state)
+        assert len(context["history"]["pc5"]) == 3
 
     def test_reset_history(self, api_instance, sample_state):
         """reset_history should clear all history."""
-        # Build some history
-        for i in range(5):
-            api_instance._build_sequence(sample_state, "pc5")
-            api_instance._build_sequence(sample_state, "5g")
+        _observe(api_instance, sample_state, 5)
 
         api_instance.reset_history()
 
@@ -360,7 +472,7 @@ class TestRATSelectionWithMockedModels:
     """Tests for RAT selection logic with mocked models."""
 
     @pytest.fixture
-    def api_with_mock_models(self):
+    def api_with_mock_models(self, sample_state):
         """Create API with mocked models that return predictable values."""
         with patch('selection.api.get_latest_model') as mock_get, \
              patch('selection.api.load_torch_model') as mock_load:
@@ -381,6 +493,7 @@ class TestRATSelectionWithMockedModels:
                 "pc5": mock_model,
                 "5g": mock_model,
             }
+            _observe(api, sample_state)
 
             return api
 
@@ -467,6 +580,7 @@ class TestRATSelectionWithMockedModels:
             from selection.api import RATSelectionAPI
             api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
             api.models = {"dsrc": mock_model_low, "pc5": mock_model_low, "5g": mock_model_low}
+            _observe(api, sample_state)
 
             contention_ctx = {
                 RATType.DSRC: (3, 0.8),
@@ -500,6 +614,7 @@ class TestRATSelectionWithMockedModels:
             from selection.api import RATSelectionAPI
             api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
             api.models = {"dsrc": mock_dsrc, "pc5": mock_pc5, "5g": mock_5g}
+            _observe(api, sample_state)
 
             # No contention context — original fallback
             decision = api.select_rat(sample_state, contention_context=None)
@@ -520,6 +635,7 @@ class TestRATSelectionWithMockedModels:
                 "pc5": ConstantModel(latency=0.3, pdr=0.995),
                 "5g": ConstantModel(latency=0.5, pdr=0.995),
             }
+            _observe(api, sample_state)
 
             decision = api.select_rat(sample_state)
             opp_decision = api.select_rat_opportunistic(sample_state)
@@ -551,6 +667,7 @@ class TestRATSelectionWithMockedModels:
             api = RATSelectionAPI(model_type="lstm", rats=ALL_RATS)
             # No 5G model loaded
             api.models = {"dsrc": mock_dsrc, "pc5": mock_pc5}
+            _observe(api, sample_state)
 
             contention_ctx = {
                 RATType.DSRC: (3, 0.5),

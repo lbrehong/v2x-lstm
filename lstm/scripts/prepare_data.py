@@ -8,7 +8,8 @@ physical positions.
 The matching process:
 1. Uses 5G data as the primary reference (highest sampling rate)
 2. For each 5G GPS point, finds corresponding DSRC/PC5 measurements
-3. Uses progressive tolerance expansion if exact match not found
+3. Only considers measurements taken within MATCH_TIME_TOLERANCE_MS of the ping,
+   uses progressive spatial tolerance expansion, and keeps the closest in time
 4. Creates unified dataset with all RATs at matching locations
 
 Usage:
@@ -35,6 +36,10 @@ def secondary_csvs(rats=DEFAULT_RATS):
 
 # GPS matching tolerance (approximately 1 meter at mid-latitudes)
 TOLERANCE = 0.00001
+
+# A secondary measurement is only paired with a 5G point if it was taken within this
+# time of the ping: the same place on another pass or tour is a different situation.
+MATCH_TIME_TOLERANCE_MS = 60_000
 
 
 def _output_name(filename):
@@ -85,6 +90,11 @@ def match_data(input_dir, primary=None, secondary=None, rats=DEFAULT_RATS):
         )
     ].sort_index()
 
+    if "tx_timestamp_ms" not in primary_df.columns:
+        raise ValueError(f"{primary} has no tx_timestamp_ms column, needed for time-aware matching")
+    primary_times = primary_df["tx_timestamp_ms"].to_numpy(dtype=float)
+    primary_coords = primary_df[["tx_latitude", "tx_longitude"]].to_numpy(dtype=float)
+
     for col in ("tx_timestamp_ms", "tx_timestamp_sec", "tx_seq_num"):
         if col in primary_df.columns:
             primary_df.drop(col, axis=1, inplace=True)
@@ -122,42 +132,45 @@ def match_data(input_dir, primary=None, secondary=None, rats=DEFAULT_RATS):
                     )
                     secondary_df[rsrp_col] = secondary_df[rsrp_col].interpolate().bfill().ffill()
 
+        # Secondary rows sorted by time, so each 5G point only scans its time window
+        order = np.argsort(secondary_df["tx_timestamp_ms"].to_numpy(dtype=float), kind="stable")
+        secondary_df = secondary_df.iloc[order].reset_index(drop=True)
+        sec_times = secondary_df["tx_timestamp_ms"].to_numpy(dtype=float)
+        sec_lat = secondary_df["tx_latitude"].to_numpy(dtype=float)
+        sec_lon = secondary_df["tx_longitude"].to_numpy(dtype=float)
+
         matched_rows = []
         matched = 0
+        no_time_overlap = 0
 
-        for _, row in primary_df.iterrows():
-            lat, lon = row["tx_latitude"], row["tx_longitude"]
+        for (lat, lon), t in zip(primary_coords, primary_times):
+            lo = np.searchsorted(sec_times, t - MATCH_TIME_TOLERANCE_MS, side="left")
+            hi = np.searchsorted(sec_times, t + MATCH_TIME_TOLERANCE_MS, side="right")
+            if lo == hi:
+                no_time_overlap += 1
+                continue
 
-            match = secondary_df[
-                (np.abs(secondary_df["tx_latitude"] - lat) <= TOLERANCE) &
-                (np.abs(secondary_df["tx_longitude"] - lon) <= TOLERANCE)
-            ]
+            # Tightest spatial tolerance with a candidate (1x, then 10x..50x), then closest in time
+            dlat = np.abs(sec_lat[lo:hi] - lat)
+            dlon = np.abs(sec_lon[lo:hi] - lon)
+            near = np.empty(0, dtype=int)
+            for mult in (1, 10, 20, 30, 40, 50):
+                near = np.flatnonzero((dlat <= TOLERANCE * mult) & (dlon <= TOLERANCE * mult))
+                if len(near):
+                    break
+            if not len(near):
+                continue
 
-            if match.empty:
-                i = 1
-                while match.empty and i < 6:
-                    match = secondary_df[
-                        (np.abs(secondary_df["tx_latitude"] - lat) <= TOLERANCE * 10 * i) &
-                        (np.abs(secondary_df["tx_longitude"] - lon) <= TOLERANCE * 10 * i)
-                    ]
-                    i += 1
+            j = lo + near[np.argmin(np.abs(sec_times[lo + near] - t))]
+            matched_data = secondary_df.iloc[j].to_dict()
+            matched_data["tx_latitude"] = lat
+            matched_data["tx_longitude"] = lon
+            matched_rows.append(matched_data)
+            matched += 1
 
-                if match.empty:
-                    print("No match found for", lat, lon)
-                else:
-                    matched_data = match.iloc[0].to_dict()
-                    matched_data["tx_latitude"] = lat
-                    matched_data["tx_longitude"] = lon
-                    matched_rows.append(matched_data)
-                    matched += 1
-            else:
-                matched_data = match.iloc[0].to_dict()
-                matched_data["tx_latitude"] = lat
-                matched_data["tx_longitude"] = lon
-                matched_rows.append(matched_data)
-                matched += 1
-
-        print(f"Total {matched} matched rows found.")
+        print(f"Total {matched} matched rows found "
+              f"({len(primary_times) - matched} 5G points without a {csvs} measurement within "
+              f"{MATCH_TIME_TOLERANCE_MS / 1000:.0f} s and ~50 m; {no_time_overlap} with none in time at all).")
         matched_df = pd.DataFrame(matched_rows)
 
         if matched_df.empty:

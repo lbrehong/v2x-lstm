@@ -121,7 +121,11 @@ python -m scripts.prepare_data --input /path/to/trimmed_data
 - Uses 5G as the primary reference (highest sampling rate)
 - Computes rolling PDR (10s window) for each RAT
 - Removes outlier latencies (<16 ms for 5G, <300 ms for secondary)
-- Deduplicates GPS points, then matches PC5/DSRC to 5G locations within ~1 m tolerance (progressively relaxed up to 50x if needed)
+- Deduplicates GPS points, then matches PC5/DSRC to 5G locations within ~1 m tolerance (progressively relaxed up to 50x if needed), considering only measurements taken within `MATCH_TIME_TOLERANCE_MS` (60 s) of the ping and keeping the closest in time. A 5G point without such a measurement has no PC5 value (PC5 unavailable there)
+- PDR is a rolling count of received packets for every RAT (5G included, `FIVEG_PDR_FROM_PACKET_LOSS = False` in `scripts/convert_json_to_trim.py`), because cohda's exports have no per-ping packet loss
+- PC5 rows without a transmitter position are dropped at conversion; PC5 timestamps use the same local clock as the 5G pings
+
+> **Tours of df_*.json exports without raw logs** (e.g. `../cohda/dataset/matched/combined/Tour1..3`): convert each tour and merge them with `python -m scripts.convert_json_to_trim --tours <folder>` (output `<folder>/trimmed`), or pass `--json_tours <folder>` to `run_pipeline`. Cohda's own top-level merged `df_*.json` are not used. Radio samples more than `RADIO_MATCH_TOLERANCE_MS` (10 s) from a ping are not joined, so pings after a radio log stops get no SINR/RSRP.
 
 **Outputs:**
 

@@ -21,7 +21,7 @@ from api_types import (
 from config import (
     MODEL_DIR, OUTPUT_DIR, TIMESTEPS, TARGET_COLS,
     PDR_RELIABILITY_THRESHOLD, PDR_AVAILABILITY_THRESHOLD, LATENCY_TIE_MARGIN_MS,
-    PACKET_SIZE_BOUNDS, DEFAULT_RATS, validate_rats,
+    PACKET_SIZE_BOUNDS, DEFAULT_RATS, LSTM_FALLBACK_RAT, validate_rats,
     create_gps_scaler, create_latency_scaler,
     create_sinr_5g_scaler, create_rsrp_5g_scaler, create_rsrp_dsrc_scaler,
 )
@@ -87,8 +87,10 @@ class RATSelectionAPI:
         # Opportunistic: previous RAT for sticky policy
         self._previous_rat: RATType = RATType.FiveG
 
-        # Sequence history for predictions
+        # Observed feature history per RAT (filled by observe(), after each decision)
         self._history: Dict[str, List[np.ndarray]] = {rat: [] for rat in self.rats}
+        # Most recent observed state; decisions never see the state they decide for
+        self._last_state: Optional[NetworkState] = None
 
         # Load models
         self._load_models()
@@ -112,17 +114,22 @@ class RATSelectionAPI:
             rat: RAT type ('dsrc', 'pc5', '5g')
 
         Returns:
-            Numpy array of normalized features
+            Numpy array of normalized features, in FEATURE_COLS[rat] order.
+            Missing measurements are NaN (never zero-filled), matching
+            learning.data_preprocessing.normalize_features.
         """
+        def value(v):
+            return np.nan if v is None else float(v)
+
         lat_lon = self.gps_scaler.transform([[state.latitude, state.longitude]])[0]
         lat_scaler = self.latency_scalers.get(rat, self.latency_scaler)
 
         if rat == "5g":
             # Features: lat, lon, latency, sinr, rsrp, pdr
-            latency = state.fiveg_latency_ms or 0.0
-            sinr = state.fiveg_sinr or 0.0
-            rsrp = state.fiveg_rsrp or 0.0
-            pdr = state.fiveg_pdr or 0.0
+            latency = value(state.fiveg_latency_ms)
+            sinr = value(state.fiveg_sinr)
+            rsrp = value(state.fiveg_rsrp)
+            pdr = value(state.fiveg_pdr)
             latency_norm = lat_scaler.transform([[latency]])[0][0]
             sinr_norm = self.sinr_5g_scaler.transform([[sinr]])[0][0]
             rsrp_norm = self.rsrp_5g_scaler.transform([[rsrp]])[0][0]
@@ -130,17 +137,20 @@ class RATSelectionAPI:
 
         elif rat == "pc5":
             # Features: lat, lon, latency, pdr
-            latency = state.pc5_latency_ms or 0.0
-            pdr = state.pc5_pdr or 0.0
+            latency = value(state.pc5_latency_ms)
+            pdr = value(state.pc5_pdr)
             latency_norm = lat_scaler.transform([[latency]])[0][0]
             return np.array([lat_lon[0], lat_lon[1], latency_norm, pdr])
 
         elif rat == "dsrc":
             # Features: lat, lon, rsrp_1, rsrp_2, latency, pdr
-            rsrp_1 = state.dsrc_rsrp_1 or 0.0
-            rsrp_2 = state.dsrc_rsrp_2 or 0.0
-            latency = state.dsrc_latency_ms or 0.0
-            pdr = state.dsrc_pdr or 0.0
+            # RSRP sentinel values (> 0 dBm, modem error) are missing, as in training
+            rsrp_1 = value(state.dsrc_rsrp_1)
+            rsrp_2 = value(state.dsrc_rsrp_2)
+            rsrp_1 = np.nan if rsrp_1 > 0 else rsrp_1
+            rsrp_2 = np.nan if rsrp_2 > 0 else rsrp_2
+            latency = value(state.dsrc_latency_ms)
+            pdr = value(state.dsrc_pdr)
             latency_norm = lat_scaler.transform([[latency]])[0][0]
             rsrp_1_norm = self.rsrp_dsrc_scaler.transform([[rsrp_1]])[0][0]
             rsrp_2_norm = self.rsrp_dsrc_scaler.transform([[rsrp_2]])[0][0]
@@ -149,50 +159,75 @@ class RATSelectionAPI:
         else:
             raise ValueError(f"Unknown RAT: {rat}")
 
-    def _build_sequence(self, state: NetworkState, rat: str) -> np.ndarray:
+    def observe(self, state: NetworkState) -> None:
         """
-        Build input sequence for model prediction.
+        Record a step's measured state, after the decision for that step.
 
-        Maintains a sliding window of features for each RAT to enable
-        sequence-based predictions.
+        Appends the state's features to every active RAT's history (keeping the
+        last TIMESTEPS) and remembers it as the last observed state. Call this
+        once per step, including steps whose decision was UNAVAILABLE, so the
+        next decision sees data up to this step and never this step's own data
+        before deciding.
 
         Args:
-            state: Current network state
+            state: Measured network state of the step just decided
+        """
+        for rat in self.rats:
+            history = self._history[rat]
+            history.append(self._state_to_features(state, rat))
+            if len(history) > TIMESTEPS:
+                del history[:-TIMESTEPS]
+        self._last_state = state
+
+    def input_window(self, rat: str) -> Optional[np.ndarray]:
+        """
+        Model input built from the observed history of a RAT.
+
+        Matches training: the last TIMESTEPS observed steps, oldest first.
+
+        Args:
             rat: RAT type
 
         Returns:
-            Input sequence array of shape (1, TIMESTEPS, num_features)
+            Array of shape (1, TIMESTEPS, num_features), or None when fewer than
+            TIMESTEPS steps were observed or the window has a missing measurement
         """
-        features = self._state_to_features(state, rat)
-        self._history[rat].append(features)
-
-        # Keep only last TIMESTEPS entries
-        if len(self._history[rat]) > TIMESTEPS:
-            self._history[rat] = self._history[rat][-TIMESTEPS:]
-
-        # Build sequence with padding if needed
-        history = self._history[rat]
+        history = self._history.get(rat, [])
         if len(history) < TIMESTEPS:
-            padding_count = TIMESTEPS - len(history)
-            padding = [np.zeros_like(features) for _ in range(padding_count)]
-            sequence = np.array(padding + history)
-        else:
-            sequence = np.array(history)
+            return None
+        window = np.array(history[-TIMESTEPS:])
+        if np.isnan(window).any():
+            return None
+        return window.reshape(1, TIMESTEPS, -1)
 
-        return sequence.reshape(1, TIMESTEPS, -1)
+    def get_context(self) -> Dict:
+        """Copy of the per-stream decision state (history, last observation, sticky RAT)."""
+        return {
+            "history": {rat: list(h) for rat, h in self._history.items()},
+            "last_state": self._last_state,
+            "previous_rat": self._previous_rat,
+        }
+
+    def set_context(self, context: Dict) -> None:
+        """Restore decision state saved by get_context (copied, not aliased)."""
+        self._history = {rat: list(context["history"].get(rat, [])) for rat in self.rats}
+        self._last_state = context["last_state"]
+        self._previous_rat = context["previous_rat"]
 
     def get_predictions(
         self,
-        state: NetworkState,
+        state: Optional[NetworkState] = None,
     ) -> Dict[RATType, Tuple[float, float]]:
         """
-        Get (latency, pdr) predictions for all RATs.
+        Get (latency, pdr) predictions for all RATs with a full observed window.
 
-        Args:
-            state: Current network state
+        Inputs come only from observed history (see observe/input_window), so
+        `state` — the step being decided — is never a model input. It is kept
+        as a parameter for API compatibility.
 
         Returns:
-            Dictionary mapping RATType to (predicted_latency, predicted_pdr)
+            Dictionary mapping RATType to (predicted_latency, predicted_pdr);
+            RATs without a full window of measurements are omitted
         """
         predictions = {}
 
@@ -201,7 +236,9 @@ class RATSelectionAPI:
                 continue
 
             model = self.models[rat_str]
-            sequence = self._build_sequence(state, rat_str)
+            sequence = self.input_window(rat_str)
+            if sequence is None:
+                continue
 
             pred_lat_arr, pred_pdr_arr = predict_torch(model, sequence)
             pred_latency = pred_lat_arr[0]
@@ -266,8 +303,10 @@ class RATSelectionAPI:
 
         return 0.5 * pdr_confidence + 0.3 * latency_confidence + 0.2 * availability_confidence
 
-    def _get_actual_pdr(self, state: NetworkState, rat: RATType) -> Optional[float]:
-        """Get actual PDR from network state for a specific RAT."""
+    def _get_actual_pdr(self, state: Optional[NetworkState], rat: RATType) -> Optional[float]:
+        """Get measured PDR from a network state for a specific RAT (None if no state)."""
+        if state is None:
+            return None
         if rat == RATType.DSRC:
             return state.dsrc_pdr
         elif rat == RATType.PC5:
@@ -313,6 +352,27 @@ class RATSelectionAPI:
             ratio = (predicted_pdr - 0.85) / (0.99 - 0.85)
             return int(min_size + ratio * (max_size - min_size))
 
+    def _no_decision(self, all_predictions: Dict[RATType, Tuple[float, float]]) -> RATDecision:
+        """Decision when the model cannot choose: the fallback RAT if active, else UNAVAILABLE."""
+        if LSTM_FALLBACK_RAT is not None and LSTM_FALLBACK_RAT in self.rats:
+            return RATDecision(
+                selected_rat=RATType.from_string(LSTM_FALLBACK_RAT),
+                confidence=0.0,
+                predicted_latency_ms=float("nan"),
+                predicted_pdr=float("nan"),
+                all_predictions=all_predictions,
+                model_type=self.model_type,
+                fallback=True,
+            )
+        return RATDecision(
+            selected_rat=RATType.UNAVAILABLE,
+            confidence=0.0,
+            predicted_latency_ms=float("inf"),
+            predicted_pdr=0.0,
+            all_predictions=all_predictions,
+            model_type=self.model_type,
+        )
+
     def select_rat(
         self,
         state: NetworkState,
@@ -347,7 +407,8 @@ class RATSelectionAPI:
         for rat_str, rat_enum in self._rat_enums:
             if rat_enum in all_predictions:
                 pred_lat, pred_pdr = all_predictions[rat_enum]
-                actual_pdr = self._get_actual_pdr(state, rat_enum)
+                # Last observed PDR (previous step), never the step being decided
+                actual_pdr = self._get_actual_pdr(self._last_state, rat_enum)
 
                 effective_pdr = pred_pdr
                 if contention_context and rat_enum in contention_context:
@@ -359,14 +420,8 @@ class RATSelectionAPI:
                 options.append((rat_enum, pred_lat, effective_pdr, actual_pdr))
 
         if not options:
-            return RATDecision(
-                selected_rat=RATType.UNAVAILABLE,
-                confidence=0.0,
-                predicted_latency_ms=float("inf"),
-                predicted_pdr=0.0,
-                all_predictions=all_predictions,
-                model_type=self.model_type,
-            )
+            # No prediction for any RAT (no full measurement window yet, or missing measurements)
+            return self._no_decision(all_predictions)
 
         # Adjust thresholds based on queue context
         pdr_threshold = self.pdr_threshold
@@ -425,6 +480,11 @@ class RATSelectionAPI:
             priority = {RATType.FiveG: 0, RATType.PC5: 1, RATType.DSRC: 2}
             selected_rat = min(tied, key=lambda opt: priority.get(opt[0], 99))[0]
 
+        fallback_rat = RATType.from_string(LSTM_FALLBACK_RAT) if LSTM_FALLBACK_RAT is not None else None
+        if selected_rat == RATType.UNAVAILABLE and fallback_rat not in all_predictions:
+            # Every predicted RAT is unavailable, and the fallback RAT has no prediction to judge it by
+            return self._no_decision(all_predictions)
+
         # Get predictions for selected RAT
         if selected_rat in all_predictions:
             pred_lat, pred_pdr = all_predictions[selected_rat]
@@ -432,7 +492,7 @@ class RATSelectionAPI:
             pred_lat, pred_pdr = float("inf"), 0.0
 
         # Compute confidence
-        confidence = self._compute_confidence(selected_rat, all_predictions, state)
+        confidence = self._compute_confidence(selected_rat, all_predictions, self._last_state)
 
         # Recommend packet size
         recommended_size = self._recommend_packet_size(selected_rat, pred_pdr)
@@ -454,9 +514,10 @@ class RATSelectionAPI:
         """
         Select RAT using reactive/opportunistic logic — no model inference.
 
-        Uses actual observed metrics from NetworkState with a sticky policy
-        to reduce handovers. Mirrors the opportunistic_best_rat algorithm
-        from rat_selection.py.
+        Uses the metrics of the last observed step (see observe), never those
+        of the step being decided, with a sticky policy to reduce handovers.
+        Mirrors the opportunistic_best_rat algorithm from rat_selection.py.
+        Returns UNAVAILABLE until a step has been observed.
 
         Algorithm:
             1. Filter RATs with actual PDR > 5%
@@ -471,11 +532,22 @@ class RATSelectionAPI:
             RATDecision with actual (not predicted) values
         """
         # Build options from actual observed metrics: (rat_str, rat_enum, latency, pdr)
+        observed = self._last_state
+        if observed is None:
+            return RATDecision(
+                selected_rat=RATType.UNAVAILABLE,
+                confidence=0.0,
+                predicted_latency_ms=float("inf"),
+                predicted_pdr=0.0,
+                all_predictions={},
+                model_type="opportunistic",
+            )
+
         options = []
         for rat_str, rat_enum in self._rat_enums:
             field_prefix = "fiveg" if rat_str == "5g" else rat_str
-            lat_val = getattr(state, f"{field_prefix}_latency_ms")
-            pdr_val = getattr(state, f"{field_prefix}_pdr")
+            lat_val = getattr(observed, f"{field_prefix}_latency_ms")
+            pdr_val = getattr(observed, f"{field_prefix}_pdr")
             latency = lat_val if lat_val is not None else 0.0
             pdr = pdr_val if pdr_val is not None else 0.0
             options.append((rat_str, rat_enum, latency, pdr))

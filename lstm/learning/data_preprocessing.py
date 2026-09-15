@@ -116,6 +116,47 @@ def generate_lstm_sequences(data, feature_cols, target_cols, seq_length, batch_s
         yield x_batch, y_batch
 
 
+def normalize_features(df, rat):
+    """
+    Scale a RAT's feature columns to [0, 1] exactly as the models were trained.
+
+    Selects FEATURE_COLS[rat], replaces RSRP sentinel values (> 0 dBm) with NaN,
+    and applies the fixed-bound scalers from create_all_scalers(rat). Missing
+    values stay NaN; callers decide how to handle them.
+
+    Args:
+        df: DataFrame containing the FEATURE_COLS[rat] columns (unscaled)
+        rat: RAT type identifier ('5g', 'pc5', or 'dsrc')
+
+    Returns:
+        New DataFrame with the scaled feature columns, same index as df
+    """
+    feature_cols = FEATURE_COLS[rat]
+    scalers = create_all_scalers(rat)
+    df = df[feature_cols].copy()
+
+    # Replace RSRP sentinel values (16383 = modem error) with NaN
+    for rsrp_col in ("rsrp_1", "rsrp_2"):
+        if rsrp_col in df.columns:
+            df[rsrp_col] = df[rsrp_col].where(df[rsrp_col] <= 0)
+
+    gps_flag = False
+    for col in feature_cols:
+        if col in ('tx_latitude', 'tx_longitude'):
+            # GPS coordinates normalized together (2D scaler)
+            if not gps_flag:
+                try:
+                    df[['tx_latitude', 'tx_longitude']] = scalers['tx_latitude'].transform(
+                        df[['tx_latitude', 'tx_longitude']])
+                except ValueError:
+                    print("Warning: NaN GPS values detected, skipping GPS normalization")
+                gps_flag = True
+        else:
+            # Each other feature normalized independently
+            df[col] = scalers[col].transform(df[[col]])
+    return df
+
+
 def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
     """
     Full preprocessing pipeline for LSTM input preparation.
@@ -147,7 +188,6 @@ def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
 
     feature_cols = FEATURE_COLS[rat]
     scalers = create_all_scalers(rat)
-    gps_scaler = scalers['tx_latitude']
 
     # Select only the columns needed for this RAT
     df = df[feature_cols].copy()
@@ -164,20 +204,7 @@ def preprocess_lstm_input(df, new, rat, target_cols, seq_length):
 
     # Normalize all features to [0, 1] range using predefined bounds
     print("Normalizing features...")
-    gps_flag = False
-    for col in feature_cols:
-        if col in ('tx_latitude', 'tx_longitude'):
-            # GPS coordinates normalized together (2D scaler)
-            if not gps_flag:
-                try:
-                    df[['tx_latitude', 'tx_longitude']] = gps_scaler.transform(
-                        df[['tx_latitude', 'tx_longitude']])
-                except ValueError:
-                    print("Warning: NaN GPS values detected, skipping GPS normalization")
-                gps_flag = True
-        else:
-            # Each other feature normalized independently
-            df[col] = scalers[col].transform(df[[col]])
+    df = normalize_features(df, rat)
 
     # Generate 3D sequences for LSTM: (samples, timesteps, features)
     print("Converting to LSTM sequences...")

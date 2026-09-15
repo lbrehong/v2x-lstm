@@ -154,6 +154,68 @@ class TestSelectBestRat:
 
         assert result == 'NaN', "Should return NaN when all RATs unavailable"
 
+    def test_falls_back_to_5g_without_any_prediction(self):
+        """No prediction for any RAT (e.g. no full measurement window): choose 5G."""
+        from selection.rat_selection import select_best_rat
+
+        row = pd.Series({
+            'pred_latency_ms_pc5_lstm': np.nan, 'pred_pdr_pc5_lstm': np.nan, 'pdr_pc5': 0.99,
+            'pred_latency_ms_5g_lstm': np.nan, 'pred_pdr_5g_lstm': np.nan, 'pdr_5g': 0.99,
+        })
+
+        assert select_best_rat(row, 'lstm') == '5g'
+        assert select_best_rat(row, 'lstm', ('pc5',)) == 'NaN'  # 5G not active: no fallback
+
+    def test_no_fallback_when_disabled(self, monkeypatch):
+        from selection.rat_selection import select_best_rat
+
+        monkeypatch.setattr('selection.rat_selection.LSTM_FALLBACK_RAT', None)
+        assert select_best_rat(pd.Series({'pdr_5g': 0.99, 'pdr_pc5': 0.99}), 'lstm') == 'NaN'
+
+    def test_falls_back_when_no_rat_has_prediction_and_measurement(self):
+        """PC5 predicted but never measured, 5G not predicted: the model cannot decide, so 5G."""
+        from selection.rat_selection import select_best_rat
+
+        row = pd.Series({
+            'pred_latency_ms_pc5_lstm': 12.0, 'pred_pdr_pc5_lstm': 0.999, 'pdr_pc5': np.nan,
+            'pred_latency_ms_5g_lstm': np.nan, 'pred_pdr_5g_lstm': np.nan, 'pdr_5g': 0.99,
+        })
+
+        assert select_best_rat(row, 'lstm') == '5g'
+
+    def test_falls_back_when_usable_rats_unavailable_and_5g_unpredicted(self):
+        """PC5 predicted but unavailable (last PDR ~0), no 5G prediction: 5G by fallback, not NaN."""
+        from selection.rat_selection import select_best_rat
+
+        row = pd.Series({
+            'pred_latency_ms_pc5_lstm': 12.0, 'pred_pdr_pc5_lstm': 0.5, 'pdr_pc5': 0.01,
+            'pred_latency_ms_5g_lstm': np.nan, 'pred_pdr_5g_lstm': np.nan, 'pdr_5g': 1.0,
+        })
+
+        assert select_best_rat(row, 'lstm') == '5g'
+        assert select_best_rat(row, 'lstm', ('pc5',)) == 'NaN'
+
+    def test_fallback_mask_matches_select_best_rat(self):
+        from selection.rat_selection import lstm_fallback_mask, select_best_rat
+
+        df = pd.DataFrame({
+            'pred_latency_ms_5g_lstm': [np.nan, 30.0, np.nan, 30.0, np.nan],
+            'pred_pdr_5g_lstm': [np.nan, 0.995, np.nan, 0.5, np.nan],
+            'pdr_5g': [0.99, 0.99, 0.99, 0.02, 1.0],
+            'pred_latency_ms_pc5_lstm': [np.nan, np.nan, 12.0, 12.0, 12.0],
+            'pred_pdr_pc5_lstm': [np.nan, np.nan, 0.95, 0.5, 0.5],
+            'pdr_pc5': [0.9, 0.9, np.nan, 0.03, 0.01],
+        })
+
+        mask = lstm_fallback_mask(df, 'lstm')
+        decisions = df.apply(select_best_rat, args=('lstm',), axis=1)
+
+        # Rows 0 and 2: nothing usable -> fallback. Row 3: 5G predicted but unavailable -> NaN.
+        # Row 4: PC5 unavailable and no 5G prediction -> fallback
+        assert mask.tolist() == [True, False, True, False, True]
+        assert decisions.tolist() == ['5g', '5g', '5g', 'NaN', '5g']
+        assert not lstm_fallback_mask(df, 'lstm', ('pc5',)).any()
+
     def test_works_with_gru_model_type(self):
         """Should work with GRU model type columns."""
         from selection.rat_selection import select_best_rat
@@ -228,6 +290,156 @@ class TestSelectBestRat:
 
         assert select_best_rat(row, 'lstm') == 'pc5'
         assert select_best_rat(row, 'lstm', ALL_RATS) == 'dsrc'
+
+
+class RecordingModel:
+    """Stand-in model: records its input batch and predicts constant normalized values."""
+
+    def __new__(cls, latency=0.5, pdr=0.97):
+        import torch
+        import torch.nn as nn
+
+        class _Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.dummy = nn.Parameter(torch.zeros(1))  # predict_torch reads the device from parameters
+                self.inputs = None
+
+            def forward(self, x):
+                self.inputs = x.numpy().copy()
+                batch = x.shape[0]
+                return torch.full((batch, 1), latency), torch.full((batch, 1), pdr)
+
+        return _Model()
+
+
+def _measurements(n=25, seed=0):
+    """Super-merged style measurements for 5G and PC5, in time order."""
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame({
+        'tx_latitude': 43.56 + np.arange(n) * 1e-4,
+        'tx_longitude': 1.466 + np.arange(n) * 1e-4,
+        'latency_ms_5g': rng.uniform(30, 200, n),
+        'pdr_5g': rng.uniform(0.8, 1.0, n),
+        'sinr': rng.uniform(5, 30, n),
+        'rsrp': rng.uniform(-120, -80, n),
+        'latency_ms_pc5': rng.uniform(5, 30, n),
+        'pdr_pc5': rng.uniform(0.7, 1.0, n),
+    })
+
+
+class TestPredictionInputs:
+    """Selection-stage model inputs must be built exactly like training inputs."""
+
+    @pytest.mark.parametrize('rat', ['5g', 'pc5'])
+    def test_windows_match_training_sequences(self, rat):
+        from config import TIMESTEPS, TARGET_COLS, FEATURE_COLS
+        from learning.data_preprocessing import preprocess_lstm_input
+        from selection.rat_selection import build_prediction_windows
+
+        df = _measurements()
+        train_df = df.rename(columns={f'latency_ms_{rat}': 'latency_ms', f'pdr_{rat}': 'pdr'})
+        X_train, _, _ = preprocess_lstm_input(train_df, new=True, rat=rat,
+                                              target_cols=TARGET_COLS, seq_length=TIMESTEPS)
+
+        windows, valid = build_prediction_windows(rat, df)
+
+        assert not valid[:TIMESTEPS].any()
+        assert valid[TIMESTEPS:].all()
+        # Training sample j predicts row j + TIMESTEPS, so they must be identical
+        np.testing.assert_allclose(windows, X_train)
+        # Regression: measured features are real values, not zero padding
+        assert windows.shape[2] == len(FEATURE_COLS[rat])
+        assert (np.abs(windows[:, :, 2:]).sum(axis=(0, 1)) > 0).all()
+
+    def test_row_is_never_part_of_its_own_window(self):
+        from config import TIMESTEPS
+        from selection.rat_selection import build_prediction_windows
+
+        df = _measurements()
+        changed = df.copy()
+        changed.loc[20, 'latency_ms_5g'] = 999.0
+
+        windows, valid = build_prediction_windows('5g', df)
+        windows_changed, _ = build_prediction_windows('5g', changed)
+        rows = np.flatnonzero(valid)
+
+        row_20 = np.flatnonzero(rows == 20)[0]
+        np.testing.assert_array_equal(windows[row_20], windows_changed[row_20])
+        assert not np.array_equal(windows[row_20 + 1], windows_changed[row_20 + 1])
+        assert rows[0] == TIMESTEPS
+
+    def test_missing_measurements_make_rows_unavailable(self):
+        from config import TIMESTEPS
+        from selection.rat_selection import get_predictions
+
+        df = _measurements(n=30)
+        df.loc[15, ['latency_ms_pc5', 'pdr_pc5']] = np.nan
+        model = RecordingModel()
+
+        latency, pdr = get_predictions(model, 'pc5', df)
+
+        unavailable = np.zeros(30, dtype=bool)
+        unavailable[:TIMESTEPS] = True
+        unavailable[16:16 + TIMESTEPS] = True  # windows that include row 15
+        assert np.isnan(latency[unavailable]).all() and np.isnan(pdr[unavailable]).all()
+        assert np.isfinite(latency[~unavailable]).all() and np.isfinite(pdr[~unavailable]).all()
+        assert model.inputs.shape[0] == (~unavailable).sum()
+        assert not np.isnan(model.inputs).any()
+
+    def test_predictions_are_denormalized(self):
+        from config import LATENCY_BOUNDS
+        from selection.rat_selection import get_predictions
+
+        latency, pdr = get_predictions(RecordingModel(latency=0.5, pdr=0.97), '5g', _measurements())
+
+        lo, hi = LATENCY_BOUNDS['5g']
+        valid = ~np.isnan(latency)
+        np.testing.assert_allclose(latency[valid], lo + 0.5 * (hi - lo), rtol=1e-6)
+        np.testing.assert_allclose(pdr[valid], 0.97, rtol=1e-6)
+
+    def test_missing_feature_column_raises(self):
+        from selection.rat_selection import get_predictions
+
+        with pytest.raises(ValueError, match='sinr'):
+            get_predictions(RecordingModel(), '5g', _measurements().drop(columns=['sinr']))
+
+
+class TestLaggedMeasurements:
+    """Selection-stage decisions for row i must only see measurements up to row i-1."""
+
+    def test_measurements_shift_by_one_row(self):
+        from selection.rat_selection import lagged_measurements
+
+        df = _measurements(n=5)
+        df['pred_pdr_5g_lstm'] = [0.9, 0.91, 0.92, 0.93, 0.94]
+        lagged = lagged_measurements(df)
+
+        for col in ('latency_ms_5g', 'pdr_5g', 'latency_ms_pc5', 'pdr_pc5'):
+            assert np.isnan(lagged[col].iloc[0])
+            np.testing.assert_array_equal(lagged[col].iloc[1:].to_numpy(), df[col].iloc[:-1].to_numpy())
+        # Predictions and unrelated columns are untouched; input is not modified
+        pd.testing.assert_series_equal(lagged['pred_pdr_5g_lstm'], df['pred_pdr_5g_lstm'])
+        pd.testing.assert_series_equal(lagged['sinr'], df['sinr'])
+        assert not np.isnan(df['pdr_5g'].iloc[0])
+
+    def test_decision_for_a_row_ignores_its_own_measurements(self):
+        from selection.rat_selection import lagged_measurements, opportunistic_best_rat
+
+        df = pd.DataFrame({
+            'latency_ms_pc5': [10.0, 10.0, 10.0],
+            'pdr_pc5': [0.9, 0.9, 0.9],
+            'latency_ms_5g': [20.0, 20.0, 20.0],
+            'pdr_5g': [0.98, 0.98, 0.98],
+        })
+        changed = df.copy()
+        changed.loc[2, 'pdr_pc5'] = 0.0  # PC5 fails at row 2 itself
+
+        before = opportunistic_best_rat(lagged_measurements(df))['Best_RAT_opp'].tolist()
+        after = opportunistic_best_rat(lagged_measurements(changed))['Best_RAT_opp'].tolist()
+
+        assert before == after  # row 2's decision only saw row 1
+        assert before[0] == 'NaN'  # nothing observed before the first row
 
 
 class TestMergeCsvs:
